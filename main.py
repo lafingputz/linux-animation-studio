@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.6: streamlined tools and frame timeline."""
+"""Linux Animation Studio v0.7: onion skins, playback and focus management."""
 import io
 import json
 import sys
@@ -7,12 +7,12 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QToolButton, QButtonGroup, QFrame,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox,
 )
 
 WIDTH, HEIGHT = 1200, 800
@@ -61,6 +61,7 @@ class Canvas(QWidget):
     document_changed = Signal()
     dirty_changed = Signal()
     frames_changed = Signal()
+    playhead_changed = Signal(int)
 
     def __init__(self):
         super().__init__()
@@ -93,6 +94,10 @@ class Canvas(QWidget):
         self.frames = [self.layers]
         self.frame_index = 0
         self.fps = 12
+        self.onion_enabled = False
+        self.onion_opacity = 35
+        self.playing = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(WIDTH, HEIGHT)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
@@ -157,9 +162,35 @@ class Canvas(QWidget):
         painter.end()
         return image
 
+    def _tinted_neighbor(self, index, tint):
+        # Compositing is read-only; onion skins never touch underlying layer images.
+        if not 0 <= index < len(self.frames):
+            return None
+        source = QImage(self.width_px, self.height_px, IMAGE_FORMAT)
+        source.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(source)
+        for layer in self.frames[index]:
+            if layer.visible:
+                painter.setOpacity(layer.opacity / 100.0)
+                painter.drawImage(0, 0, layer.image)
+        painter.end()
+        painter = QPainter(source)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(source.rect(), tint)
+        painter.end()
+        return source
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), Qt.GlobalColor.white)
+        if self.onion_enabled and not self.playing:
+            for index, tint in ((self.frame_index - 1, QColor('#d65c66')),
+                                (self.frame_index + 1, QColor('#35a87c'))):
+                neighbor = self._tinted_neighbor(index, tint)
+                if neighbor is not None:
+                    p.setOpacity(self.onion_opacity / 100.0)
+                    p.drawImage(0, 0, neighbor)
+            p.setOpacity(1.0)
         for layer in self.layers:
             if layer.visible:
                 p.setOpacity(layer.opacity / 100.0)
@@ -185,14 +216,14 @@ class Canvas(QWidget):
                         p.setOpacity(drawn_layer.opacity / 100.0)
                         p.drawImage(0, 0, preview_layer if drawn_layer.id == layer.id else drawn_layer.image)
                 p.setOpacity(1.0)
-        outlined = self.drag_rect if self.drag_rect is not None else self.selection
+        outlined = None if self.playing else (self.drag_rect if self.drag_rect is not None else self.selection)
         if outlined is not None and not outlined.isEmpty():
             p.setPen(QPen(QColor(255,255,255), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(outlined)
             p.setPen(QPen(QColor(10,10,10), 1, Qt.PenStyle.DotLine))
             p.drawRect(outlined.adjusted(1,1,-1,-1))
-        if self.hover_position is not None:
+        if self.hover_position is not None and not self.playing:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             diameter = self.size if self.tool == "eraser" else self.size * (0.15 + 0.85 * self.hover_pressure)
             center = self.hover_position
@@ -246,7 +277,7 @@ class Canvas(QWidget):
             self._redo.pop(0)
 
     def _begin_stroke(self, kind):
-        if self.drawing:
+        if self.drawing or self.playing:
             return
         layer = self.active_layer()
         if layer is None or not layer.visible:
@@ -447,6 +478,8 @@ class Canvas(QWidget):
                       max(0, min(self.height_px-1, int(position.y()))))
 
     def _start_interaction(self, position):
+        if self.playing:
+            return
         point = self._point(position)
         if self.tool == 'select':
             self.drag_origin = point
@@ -531,9 +564,13 @@ class Canvas(QWidget):
     def tabletEvent(self, event):
         typ = event.type()
         pressure = float(event.pressure())
+        self.setFocus(Qt.FocusReason.MouseFocusReason) if typ == QEvent.Type.TabletPress else None
         self.show_hover(event.position(), pressure if self.drawing else 1.0)
         device = event.pointingDevice()
         name = device.name() if device else 'Unknown tablet'
+        if self.playing:
+            event.accept()
+            return
         if typ == QEvent.Type.TabletPress:
             self.ignore_mouse = True
             if self.tool in ("brush", "eraser"):
@@ -558,6 +595,10 @@ class Canvas(QWidget):
         event.accept()
 
     def mousePressEvent(self, event):
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if self.playing:
+            event.accept()
+            return
         self.show_hover(event.position(), 1.0)
         if not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton:
             if self.tool in ('brush', 'eraser'):
@@ -589,17 +630,20 @@ class Canvas(QWidget):
     def _copy_layers(self, layers):
         return [Layer(x.id, x.name, QImage(x.image), x.visible, x.opacity) for x in layers]
 
-    def _finish_frame_change(self):
+    def _finish_frame_change(self, mark_dirty=True):
         self.deselect()
         self._undo.clear()
         self._redo.clear()
         self.history_changed.emit(False, False)
         self.document_changed.emit()
-        self.frames_changed.emit()
-        self._mark_dirty()
+        if mark_dirty:
+            self.frames_changed.emit()
+            self._mark_dirty()
+        else:
+            self.playhead_changed.emit(self.frame_index)
         self.update()
 
-    def change_frame(self, index):
+    def change_frame(self, index, playback=False):
         if self.drawing or self.drag_origin is not None or not 0 <= index < len(self.frames):
             return
         if index == self.frame_index:
@@ -607,7 +651,7 @@ class Canvas(QWidget):
         self.frame_index = index
         self.layers = self.frames[index]
         self.active_id = self.layers[-1].id
-        self._finish_frame_change()
+        self._finish_frame_change(mark_dirty=not playback)
 
     def add_frame(self, duplicate=False):
         if self.drawing or self.drag_origin is not None or len(self.frames) >= 120:
@@ -648,7 +692,9 @@ class Canvas(QWidget):
         # A frame owns its layer images; each frame has independent editable pixels.
         manifest = dict(format='linux-animation-studio', version=PROJECT_VERSION,
                         width=self.width_px, height=self.height_px,
-                        active_frame=self.frame_index, fps=self.fps, frames=[])
+                        active_frame=self.frame_index, fps=self.fps,
+                        onion_enabled=self.onion_enabled, onion_opacity=self.onion_opacity,
+                        loop_playback=getattr(self, 'loop_playback', True), frames=[])
         path = Path(path)
         temporary = path.with_name(path.name + '.tmp')
         try:
@@ -721,6 +767,9 @@ class Canvas(QWidget):
         self.frames = frames
         self.frame_index = index
         self.fps = fps
+        self.onion_enabled = bool(info.get('onion_enabled', False))
+        self.onion_opacity = max(0, min(100, int(info.get('onion_opacity', 35))))
+        self.loop_playback = bool(info.get('loop_playback', True))
         self.layers = frames[index]
         self.active_id = active_id
         self.setFixedSize(width, height)
@@ -739,6 +788,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.project_path = None
         self.resize(1370, 930)
+        self.play_timer = QTimer(self)
+        self.play_timer.setInterval(15)
+        self.play_timer.timeout.connect(self._playback_tick)
+        self.play_clock = QElapsedTimer()
+        self.play_start_frame = 0
+        self._refreshing_frames = False
         root = QWidget()
         vertical = QVBoxLayout(root)
         toolbar = QHBoxLayout()
@@ -749,6 +804,7 @@ class MainWindow(QMainWindow):
         self.canvas.dirty_changed.connect(self.refresh_title)
         self.canvas.document_changed.connect(self.refresh_layers)
         self.canvas.frames_changed.connect(self.refresh_frames)
+        self.canvas.playhead_changed.connect(self.refresh_playhead)
 
         def button(text, callback):
             item = QPushButton(text)
@@ -789,6 +845,7 @@ class MainWindow(QMainWindow):
         self.size_input.setValue(self.canvas.size)
         self.size_input.setSuffix(' px')
         self.size_input.valueChanged.connect(self.change_size)
+        self.size_input.editingFinished.connect(self.return_canvas_focus)
         size_row.addWidget(self.size_input)
         left.addLayout(size_row)
         left.addStretch()
@@ -821,6 +878,7 @@ class MainWindow(QMainWindow):
         self.opacity_input.setSuffix(' %')
         self.opacity_input.setValue(100)
         self.opacity_input.valueChanged.connect(self.canvas.set_opacity)
+        self.opacity_input.editingFinished.connect(self.return_canvas_focus)
         right.addWidget(self.opacity_input)
         content.addLayout(right)
         vertical.addLayout(content, 1)
@@ -846,6 +904,30 @@ class MainWindow(QMainWindow):
         frame_controls.addWidget(self.frame_label)
         frame_controls.addStretch()
         timeline.addLayout(frame_controls)
+        play_controls = QHBoxLayout()
+        self.play_button = QPushButton('▶ Play')
+        self.play_button.clicked.connect(self.toggle_playback)
+        play_controls.addWidget(self.play_button)
+        self.stop_button = QPushButton('■ Stop')
+        self.stop_button.clicked.connect(self.stop_playback)
+        play_controls.addWidget(self.stop_button)
+        self.loop_checkbox = QCheckBox('Loop')
+        self.loop_checkbox.setChecked(True)
+        self.loop_checkbox.toggled.connect(self.set_loop)
+        play_controls.addWidget(self.loop_checkbox)
+        self.onion_checkbox = QCheckBox('Onion skins (previous red, next green)')
+        self.onion_checkbox.toggled.connect(self.set_onion_enabled)
+        play_controls.addWidget(self.onion_checkbox)
+        play_controls.addWidget(QLabel('Ghost opacity:'))
+        self.onion_spin = QSpinBox()
+        self.onion_spin.setRange(0, 100)
+        self.onion_spin.setSuffix(' %')
+        self.onion_spin.setValue(35)
+        self.onion_spin.valueChanged.connect(self.set_onion_opacity)
+        self.onion_spin.editingFinished.connect(self.return_canvas_focus)
+        play_controls.addWidget(self.onion_spin)
+        play_controls.addStretch()
+        timeline.addLayout(play_controls)
         self.frame_list = QListWidget()
         self.frame_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.frame_list.setFlow(QListWidget.Flow.LeftToRight)
@@ -869,10 +951,71 @@ class MainWindow(QMainWindow):
                         ('Ctrl+Shift+S', self.save_project_as), ('Ctrl+O', self.open_project),
                         ('[', lambda: self.adjust_brush(-1)),
                         (']', lambda: self.adjust_brush(1)),
-                        ('Ctrl+A', self.canvas.select_all), ('Ctrl+D', self.canvas.deselect)]:
+                        ('Ctrl+A', self.canvas.select_all), ('Ctrl+D', self.canvas.deselect),
+                        ('Alt+Left', lambda: self.navigate_frame(-1)),
+                        ('Alt+Right', lambda: self.navigate_frame(1)),
+                        ('Space', self.toggle_playback)]:
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
+
+    def return_canvas_focus(self):
+        self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def navigate_frame(self, delta):
+        if not self.canvas.playing:
+            self.canvas.change_frame(self.canvas.frame_index + delta)
+
+    def set_loop(self, enabled):
+        self.canvas.loop_playback = enabled
+        self.canvas._mark_dirty()
+
+    def set_onion_enabled(self, enabled):
+        self.canvas.onion_enabled = enabled
+        self.canvas.update()
+        self.canvas._mark_dirty()
+
+    def set_onion_opacity(self, value):
+        self.canvas.onion_opacity = value
+        self.canvas.update()
+        self.canvas._mark_dirty()
+
+    def toggle_playback(self):
+        if self.canvas.playing:
+            self.pause_playback()
+            return
+        if self.canvas.drawing or self.canvas.drag_origin is not None:
+            return
+        self.canvas.playing = True
+        self.play_start_frame = self.canvas.frame_index
+        self.play_clock.start()
+        self.play_timer.start()
+        self.play_button.setText('Ⅱ Pause')
+        self.canvas.update()
+
+    def _playback_tick(self):
+        if not self.canvas.playing:
+            return
+        count = len(self.canvas.frames)
+        elapsed_frames = (self.play_clock.elapsed() * self.canvas.fps) // 1000
+        absolute_frame = self.play_start_frame + elapsed_frames
+        if not self.loop_checkbox.isChecked() and absolute_frame >= count:
+            self.canvas.change_frame(count - 1, playback=True)
+            self.pause_playback()
+            return
+        index = absolute_frame % count
+        if index != self.canvas.frame_index:
+            self.canvas.change_frame(index, playback=True)
+
+    def pause_playback(self):
+        self.play_timer.stop()
+        self.canvas.playing = False
+        self.play_button.setText('▶ Play')
+        self.canvas.update()
+
+    def stop_playback(self):
+        self.pause_playback()
+        self.canvas.change_frame(0, playback=True)
 
     def set_tool(self, tool):
         self.canvas.change_tool(tool)
@@ -885,6 +1028,9 @@ class MainWindow(QMainWindow):
         self.size_input.setValue(self.size_input.value() + offset)
 
     def change_fps(self, fps):
+        if self.canvas.playing:
+            self.play_start_frame = self.canvas.frame_index
+            self.play_clock.restart()
         if self.canvas.fps != fps:
             self.canvas.fps = fps
             self.canvas._mark_dirty()
@@ -893,6 +1039,12 @@ class MainWindow(QMainWindow):
         visible = not self.timeline_container.isVisible()
         self.timeline_container.setVisible(visible)
         self.timeline_toggle.setText('Hide Animation Timeline' if visible else 'Show Animation Timeline')
+
+    def refresh_playhead(self, index):
+        self.frame_list.blockSignals(True)
+        self.frame_list.setCurrentRow(index)
+        self.frame_list.blockSignals(False)
+        self.frame_label.setText(f'Frame {index + 1} / {len(self.canvas.frames)}')
 
     def refresh_frames(self):
         from PySide6.QtGui import QIcon, QPixmap
@@ -908,10 +1060,19 @@ class MainWindow(QMainWindow):
         self.fps_input.blockSignals(True)
         self.fps_input.setValue(self.canvas.fps)
         self.fps_input.blockSignals(False)
+        self.onion_checkbox.blockSignals(True)
+        self.onion_checkbox.setChecked(self.canvas.onion_enabled)
+        self.onion_checkbox.blockSignals(False)
+        self.onion_spin.blockSignals(True)
+        self.onion_spin.setValue(self.canvas.onion_opacity)
+        self.onion_spin.blockSignals(False)
+        self.loop_checkbox.blockSignals(True)
+        self.loop_checkbox.setChecked(getattr(self.canvas, 'loop_playback', True))
+        self.loop_checkbox.blockSignals(False)
 
     def refresh_title(self):
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.6 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.7 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
@@ -966,6 +1127,7 @@ class MainWindow(QMainWindow):
         return result == QMessageBox.StandardButton.Yes
 
     def open_project(self):
+        self.pause_playback()
         if not self._confirm_discard():
             return
         path, _ = QFileDialog.getOpenFileName(self, 'Open editable project',
@@ -1015,6 +1177,7 @@ class MainWindow(QMainWindow):
         self.status.setText(('Exported: ' if ok else 'Export failed: ') + path)
 
     def closeEvent(self, event):
+        self.pause_playback()
         if self._confirm_discard():
             event.accept()
         else:
