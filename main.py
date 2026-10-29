@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.10: persistent animation layer tracks."""
+"""Linux Animation Studio v0.11: onion skin fix, brush presets and imports."""
 import io
 import math
 import shutil
@@ -13,7 +13,7 @@ from bisect import bisect_left
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -101,6 +101,8 @@ class Canvas(QWidget):
         self.active_id = self.layers[0].id
         self.color = QColor('#222222')
         self.size = 12
+        self.brush_preset = 'Round'
+        self.brush_settings = {name: {'size': size, 'opacity': opacity} for name, size, opacity in [('Round', 12, 100), ('Pencil', 9, 55), ('Ink', 6, 100), ('Airbrush', 32, 22)]}
         self.eraser = False
         self.tool = 'brush'  # brush, eraser, select, move
         self.selection = None  # QRect in document pixels
@@ -263,7 +265,7 @@ class Canvas(QWidget):
         source.fill(Qt.GlobalColor.transparent)
         painter = QPainter(source)
         for layer in self.frames[index]:
-            if layer.visible:
+            if layer.visible and layer.mode == "animated":
                 painter.setOpacity(layer.opacity / 100.0)
                 painter.drawImage(0, 0, layer.image)
         self.draw_motion_objects(painter, index)
@@ -277,14 +279,6 @@ class Canvas(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), Qt.GlobalColor.white)
-        if self.onion_enabled and not self.playing:
-            for index, tint in ((self.frame_index - 1, QColor('#d65c66')),
-                                (self.frame_index + 1, QColor('#35a87c'))):
-                neighbor = self._tinted_neighbor(index, tint)
-                if neighbor is not None:
-                    p.setOpacity(self.onion_opacity / 100.0)
-                    p.drawImage(0, 0, neighbor)
-            p.setOpacity(1.0)
         for layer in self.layers:
             if layer.visible:
                 p.setOpacity(layer.opacity / 100.0)
@@ -312,6 +306,14 @@ class Canvas(QWidget):
                         p.drawImage(0, 0, preview_layer if drawn_layer.id == layer.id else drawn_layer.image)
                 p.setOpacity(1.0)
                 self.draw_motion_objects(p, self.frame_index)
+        if self.onion_enabled and not self.playing:
+            for index, tint in ((self.frame_index - 1, QColor('#d65c66')),
+                                (self.frame_index + 1, QColor('#35a87c'))):
+                neighbor = self._tinted_neighbor(index, tint)
+                if neighbor is not None:
+                    p.setOpacity(self.onion_opacity / 100.0)
+                    p.drawImage(0, 0, neighbor)
+            p.setOpacity(1.0)
         outlined = None if self.playing else (self.drag_rect if self.drag_rect is not None else self.selection)
         if outlined is not None and not outlined.isEmpty():
             p.setPen(QPen(QColor(255,255,255), 1, Qt.PenStyle.DashLine))
@@ -404,21 +406,43 @@ class Canvas(QWidget):
             self._include_point(self.last, self.size)
         painter = QPainter(layer.image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        if self.tool == "eraser":
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            pen = QPen(QColor(0, 0, 0, 255), width, Qt.PenStyle.SolidLine,
-                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        else:
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            pen = QPen(self.color, width, Qt.PenStyle.SolidLine,
-                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
         if self.selection is not None:
             painter.setClipRect(self.selection)
-        if self.last is None:
-            painter.drawPoint(point)
+        if self.tool == 'eraser':
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.setPen(QPen(QColor(0, 0, 0, 255), width, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            if self.last is None: painter.drawPoint(point)
+            else: painter.drawLine(self.last, point)
         else:
-            painter.drawLine(self.last, point)
+            preset = self.brush_preset
+            opacity = self.brush_settings[preset]['opacity'] / 100.0
+            if preset == 'Airbrush':
+                # A soft radial alpha stamp, spaced along the line for smooth movement.
+                dx = point.x() - self.last.x() if self.last is not None else 0.0
+                dy = point.y() - self.last.y() if self.last is not None else 0.0
+                steps = max(1, math.ceil(math.hypot(dx, dy) / max(2.0, width * 0.20)))
+                for i in range(steps + 1):
+                    t = i / steps
+                    x = (self.last.x() + dx * t) if self.last is not None else point.x()
+                    y = (self.last.y() + dy * t) if self.last is not None else point.y()
+                    r = max(1.0, width / 2.0)
+                    grad = QRadialGradient(QPointF(x, y), r)
+                    center = QColor(self.color); center.setAlphaF(min(1.0, opacity * 0.24))
+                    edge = QColor(self.color); edge.setAlpha(0)
+                    grad.setColorAt(0.0, center); grad.setColorAt(1.0, edge)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(grad)
+                    painter.drawEllipse(QPointF(x, y), r, r)
+            else:
+                ink_width = max(0.75, width * (0.75 if preset == 'Ink' else 1.0))
+                color = QColor(self.color)
+                # Pencil is semi-transparent, with subtle tapered pressure response.
+                color.setAlphaF(min(1.0, opacity * (0.50 if preset == 'Pencil' else 1.0)))
+                painter.setPen(QPen(color, ink_width, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                if self.last is None: painter.drawPoint(point)
+                else: painter.drawLine(self.last, point)
         painter.end()
         self.last = QPointF(point)
         self.update(self._stroke_bounds.toAlignedRect())
@@ -1101,6 +1125,19 @@ class MainWindow(QMainWindow):
         self.size_input.editingFinished.connect(self.return_canvas_focus)
         size_row.addWidget(self.size_input)
         left.addLayout(size_row)
+        left.addWidget(QLabel('Brush preset'))
+        self.brush_select = QComboBox()
+        self.brush_select.addItems(['Round', 'Pencil', 'Ink', 'Airbrush'])
+        self.brush_select.currentTextChanged.connect(self.change_brush_preset)
+        left.addWidget(self.brush_select)
+        left.addWidget(QLabel('Brush opacity'))
+        self.brush_opacity = QSpinBox()
+        self.brush_opacity.setRange(1, 100)
+        self.brush_opacity.setSuffix(' %')
+        self.brush_opacity.setValue(100)
+        self.brush_opacity.valueChanged.connect(self.change_brush_opacity)
+        self.brush_opacity.editingFinished.connect(self.return_canvas_focus)
+        left.addWidget(self.brush_opacity)
         left.addStretch()
         content.addLayout(left)
 
@@ -1258,6 +1295,7 @@ class MainWindow(QMainWindow):
             ('Save Project', self.save_project, 'Ctrl+S'),
             ('Save Project As', self.save_project_as, 'Ctrl+Shift+S'),
             ('Close Project', self.close_project, 'Ctrl+W'),
+            ('Import Image as Layer...', self.import_image_layer, 'Ctrl+I'),
             ('Export...', self.export_animation, 'Ctrl+E'),
             ('Export Current Frame PNG', self.export_png, None),
             ('Quit', self.close, 'Ctrl+Q'),
@@ -1489,9 +1527,27 @@ class MainWindow(QMainWindow):
         self.undo_button.setEnabled(undo)
         self.redo_button.setEnabled(redo)
 
+    def change_brush_preset(self, name):
+        if name not in self.canvas.brush_settings:
+            return
+        self.canvas.brush_preset = name
+        settings = self.canvas.brush_settings[name]
+        self.size_input.blockSignals(True)
+        self.size_input.setValue(settings['size'])
+        self.size_input.blockSignals(False)
+        self.brush_opacity.blockSignals(True)
+        self.brush_opacity.setValue(settings['opacity'])
+        self.brush_opacity.blockSignals(False)
+        self.change_size(settings['size'])
+        self.return_canvas_focus()
+
+    def change_brush_opacity(self, opacity):
+        self.canvas.brush_settings[self.canvas.brush_preset]['opacity'] = opacity
+
     def change_size(self, size):
         old = self.canvas.cursor_rect()
         self.canvas.size = size
+        self.canvas.brush_settings[self.canvas.brush_preset]['size'] = size
         self.canvas.update(old.toAlignedRect())
         self.canvas.refresh_cursor()
 
@@ -1591,6 +1647,42 @@ class MainWindow(QMainWindow):
         if not self.project_active:
             return False
         return self._save_to(self.project_path) if self.project_path else self.save_project_as()
+
+    def import_image_layer(self):
+        if not self.project_active:
+            QMessageBox.information(self, 'Import', 'Create or open a project first.')
+            return
+        if self.canvas.playing:
+            self.pause_playback()
+        path, _ = QFileDialog.getOpenFileName(self, 'Import image as layer', '',
+                                              'Images (*.png *.jpg *.jpeg *.webp)')
+        if not path:
+            return
+        source = QImage(path)
+        if source.isNull():
+            QMessageBox.warning(self, 'Import image', 'Unable to decode the selected image.')
+            return
+        w, h = self.canvas.width_px, self.canvas.height_px
+        if source.width() > w or source.height() > h:
+            answer = QMessageBox.question(self, 'Image is larger than canvas',
+                'Scale the image to fit the canvas? Choose No to keep its original size and crop overflow.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+            if answer == QMessageBox.StandardButton.Yes:
+                source = source.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        new_image = transparent_image(w, h)
+        painter = QPainter(new_image)
+        painter.drawImage((w - source.width()) // 2, (h - source.height()) // 2, source)
+        painter.end()
+        layer = self.canvas.active_layer()
+        idx = self.canvas.layers.index(layer) + 1 if layer else len(self.canvas.layers)
+        name = Path(path).stem[:60] or 'Imported image'
+        imported = Layer(uuid.uuid4().hex, name, new_image)
+        cmd = dict(type='add', layer=imported, index=idx, previous_active=self.canvas.active_id)
+        self.canvas._apply(cmd, True)
+        self.canvas._push(cmd)
+        self.refresh_layers()
 
     def export_png(self):
         if not self.project_active:
