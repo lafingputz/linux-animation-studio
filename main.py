@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.5: selections, moves, opacity, and .las projects."""
+"""Linux Animation Studio v0.6: streamlined tools and frame timeline."""
 import io
 import json
 import sys
@@ -12,12 +12,12 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcu
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSlider, QVBoxLayout, QWidget, QInputDialog, QComboBox,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QToolButton, QButtonGroup, QFrame,
 )
 
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 MAX_STEPS = 50
 MAX_HISTORY_BYTES = 96 * 1024 * 1024
 
@@ -60,6 +60,7 @@ class Canvas(QWidget):
     history_changed = Signal(bool, bool)
     document_changed = Signal()
     dirty_changed = Signal()
+    frames_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -69,7 +70,7 @@ class Canvas(QWidget):
         self.color = QColor('#222222')
         self.size = 12
         self.eraser = False
-        self.tool = "brush"  # brush, select, move
+        self.tool = 'brush'  # brush, eraser, select, move
         self.selection = None  # QRect in document pixels
         self.drag_origin = None
         self.drag_rect = None
@@ -89,6 +90,9 @@ class Canvas(QWidget):
         self._undo = []
         self._redo = []
         self.dirty = False
+        self.frames = [self.layers]
+        self.frame_index = 0
+        self.fps = 12
         self.setFixedSize(WIDTH, HEIGHT)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
@@ -111,7 +115,7 @@ class Canvas(QWidget):
         pos = self.hover_position if pos is None else pos
         if pos is None:
             return QRectF()
-        diameter = (self.size if self.eraser else self.size * (0.15 + 0.85 * self.hover_pressure)) if self.tool == "brush" else 8
+        diameter = (self.size if self.tool == "eraser" else self.size * (0.15 + 0.85 * self.hover_pressure)) if self.tool in ("brush", "eraser") else 8
         radius = max(3.0, diameter / 2.0)
         return QRectF(pos.x() - radius - 4, pos.y() - radius - 4,
                       2 * radius + 8, 2 * radius + 8)
@@ -190,9 +194,9 @@ class Canvas(QWidget):
             p.drawRect(outlined.adjusted(1,1,-1,-1))
         if self.hover_position is not None:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            diameter = self.size if self.eraser else self.size * (0.15 + 0.85 * self.hover_pressure)
+            diameter = self.size if self.tool == "eraser" else self.size * (0.15 + 0.85 * self.hover_pressure)
             center = self.hover_position
-            if self.eraser and self.tool == "brush":
+            if self.tool == "eraser":
                 r = diameter / 2.0
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(QColor(255, 255, 255, 220), 2))
@@ -215,6 +219,7 @@ class Canvas(QWidget):
         self.document_changed.emit()
         self.update()
         self._mark_dirty()
+        self.frames_changed.emit()
 
     def _push(self, command):
         self._undo.append(command)
@@ -222,6 +227,7 @@ class Canvas(QWidget):
         self._trim_history()
         self.history_changed.emit(bool(self._undo), bool(self._redo))
         self._mark_dirty()
+        self.frames_changed.emit()
 
     def _history_cost(self):
         total = 0
@@ -271,7 +277,7 @@ class Canvas(QWidget):
             self._include_point(self.last, self.size)
         painter = QPainter(layer.image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        if self.eraser:
+        if self.tool == "eraser":
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
             pen = QPen(QColor(0, 0, 0, 255), width, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
@@ -308,6 +314,7 @@ class Canvas(QWidget):
         self._before_stroke = None
         self._stroke_bounds = None
         self._stroke_layer_id = None
+        self.frames_changed.emit()
 
     def _apply(self, cmd, forward):
         typ = cmd['type']
@@ -336,9 +343,11 @@ class Canvas(QWidget):
             if layer:
                 self.layers.remove(layer)
                 self.layers.insert(cmd['after'] if forward else cmd['before'], layer)
+        self.frames[self.frame_index] = self.layers
         self.document_changed.emit()
         self.update()
         self._mark_dirty()
+        self.frames_changed.emit()
 
     def undo(self):
         if self.drawing or not self._undo:
@@ -418,6 +427,7 @@ class Canvas(QWidget):
         if self.drawing or self.drag_origin is not None:
             return
         self.tool = tool
+        self.eraser = tool == "eraser"
         self.refresh_cursor()
 
     def set_selection(self, rect):
@@ -516,6 +526,7 @@ class Canvas(QWidget):
         layer.image = after
         self._push(dict(type='patch', id=layer.id, rect=layer.image.rect(), before=before, after=after.copy()))
         self.update()
+        self.frames_changed.emit()
 
     def tabletEvent(self, event):
         typ = event.type()
@@ -525,7 +536,7 @@ class Canvas(QWidget):
         name = device.name() if device else 'Unknown tablet'
         if typ == QEvent.Type.TabletPress:
             self.ignore_mouse = True
-            if self.tool == "brush":
+            if self.tool in ("brush", "eraser"):
                 self._begin_stroke('tablet')
                 self.stroke(event.position(), pressure, True)
             else:
@@ -549,7 +560,7 @@ class Canvas(QWidget):
     def mousePressEvent(self, event):
         self.show_hover(event.position(), 1.0)
         if not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton:
-            if self.tool == 'brush':
+            if self.tool in ('brush', 'eraser'):
                 self._begin_stroke('mouse')
                 self.stroke(event.position(), 1.0, False)
             else:
@@ -575,19 +586,83 @@ class Canvas(QWidget):
                 self._finish_interaction(event.position())
         event.accept()
 
+    def _copy_layers(self, layers):
+        return [Layer(x.id, x.name, QImage(x.image), x.visible, x.opacity) for x in layers]
+
+    def _finish_frame_change(self):
+        self.deselect()
+        self._undo.clear()
+        self._redo.clear()
+        self.history_changed.emit(False, False)
+        self.document_changed.emit()
+        self.frames_changed.emit()
+        self._mark_dirty()
+        self.update()
+
+    def change_frame(self, index):
+        if self.drawing or self.drag_origin is not None or not 0 <= index < len(self.frames):
+            return
+        if index == self.frame_index:
+            return
+        self.frame_index = index
+        self.layers = self.frames[index]
+        self.active_id = self.layers[-1].id
+        self._finish_frame_change()
+
+    def add_frame(self, duplicate=False):
+        if self.drawing or self.drag_origin is not None or len(self.frames) >= 120:
+            return
+        if duplicate:
+            layers = self._copy_layers(self.layers)
+        else:
+            layers = [Layer(x.id, x.name, transparent_image(self.width_px, self.height_px),
+                            x.visible, x.opacity) for x in self.layers]
+        self.frames.insert(self.frame_index + 1, layers)
+        self.frame_index += 1
+        self.layers = layers
+        self.active_id = layers[-1].id
+        self._finish_frame_change()
+
+    def delete_frame(self):
+        if self.drawing or self.drag_origin is not None or len(self.frames) <= 1:
+            return
+        del self.frames[self.frame_index]
+        self.frame_index = min(self.frame_index, len(self.frames) - 1)
+        self.layers = self.frames[self.frame_index]
+        self.active_id = self.layers[-1].id
+        self._finish_frame_change()
+
+    def frame_thumbnail(self, index):
+        result = QImage(self.width_px, self.height_px, IMAGE_FORMAT)
+        result.fill(Qt.GlobalColor.white)
+        p = QPainter(result)
+        for layer in self.frames[index]:
+            if layer.visible:
+                p.setOpacity(layer.opacity / 100.0)
+                p.drawImage(0, 0, layer.image)
+        p.end()
+        return result.scaled(90, 60, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+
     def save_project(self, path):
+        # A frame owns its layer images; each frame has independent editable pixels.
         manifest = dict(format='linux-animation-studio', version=PROJECT_VERSION,
                         width=self.width_px, height=self.height_px,
-                        active_layer=self.active_id,
-                        layers=[dict(id=x.id, name=x.name, visible=x.visible, opacity=x.opacity,
-                                     file=f'layers/{x.id}.png') for x in self.layers])
+                        active_frame=self.frame_index, fps=self.fps, frames=[])
         path = Path(path)
         temporary = path.with_name(path.name + '.tmp')
         try:
             with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                for index, layers in enumerate(self.frames):
+                    records = []
+                    for layer in layers:
+                        filename = f'frames/{index}/{layer.id}.png'
+                        records.append(dict(id=layer.id, name=layer.name, visible=layer.visible,
+                                            opacity=layer.opacity, file=filename))
+                        archive.writestr(filename, png_bytes(layer.image))
+                    manifest['frames'].append(dict(layers=records))
+                manifest['active_layer'] = self.active_id
                 archive.writestr('manifest.json', json.dumps(manifest, indent=2))
-                for layer in self.layers:
-                    archive.writestr(f'layers/{layer.id}.png', png_bytes(layer.image))
                 archive.writestr('preview.png', png_bytes(self.composite(True)))
             temporary.replace(path)
         except Exception:
@@ -597,37 +672,56 @@ class Canvas(QWidget):
         self.dirty_changed.emit()
 
     def load_project(self, path):
-        # Decode and validate fully before modifying the current document.
+        # Validate entire archive before replacing the current document.
         with zipfile.ZipFile(path, 'r') as archive:
             info = json.loads(archive.read('manifest.json'))
-            if info.get('format') != 'linux-animation-studio' or info.get('version') != PROJECT_VERSION:
+            version = info.get('version')
+            if info.get('format') != 'linux-animation-studio' or version not in (1, 2):
                 raise ValueError('Unsupported .las project format/version')
             width, height = int(info['width']), int(info['height'])
             if not (1 <= width <= 8192 and 1 <= height <= 8192):
                 raise ValueError('Invalid canvas dimensions')
-            entries = info['layers']
-            if not isinstance(entries, list) or not 1 <= len(entries) <= 100:
-                raise ValueError('Invalid layer list')
-            layers = []
-            seen = set()
-            for entry in entries:
-                lid = entry['id']
-                if not isinstance(lid, str) or not lid.isalnum() or lid in seen:
-                    raise ValueError('Invalid or duplicate layer ID')
-                seen.add(lid)
-                if entry['file'] != f'layers/{lid}.png':
-                    raise ValueError('Invalid layer asset path')
-                image = image_from_bytes(archive.read(entry['file']), width, height)
-                opacity = int(entry.get('opacity', 100))
-                if not 0 <= opacity <= 100:
-                    raise ValueError('Invalid layer opacity')
-                layers.append(Layer(lid, str(entry['name']), image, bool(entry['visible']), opacity))
+            frame_entries = [dict(layers=info['layers'])] if version == 1 else info['frames']
+            if not isinstance(frame_entries, list) or not 1 <= len(frame_entries) <= 120:
+                raise ValueError('Invalid frame list')
+            frames = []
+            for index, frame in enumerate(frame_entries):
+                entries = frame['layers']
+                if not isinstance(entries, list) or not 1 <= len(entries) <= 100:
+                    raise ValueError('Invalid layer list')
+                layers = []
+                seen = set()
+                for entry in entries:
+                    lid = entry['id']
+                    if not isinstance(lid, str) or not lid.isalnum() or lid in seen:
+                        raise ValueError('Invalid or duplicate layer ID')
+                    seen.add(lid)
+                    filename = (f'layers/{lid}.png' if version == 1 else
+                                f'frames/{index}/{lid}.png')
+                    if entry['file'] != filename:
+                        raise ValueError('Invalid layer asset path')
+                    image = image_from_bytes(archive.read(filename), width, height)
+                    opacity = int(entry.get('opacity', 100))
+                    if not 0 <= opacity <= 100:
+                        raise ValueError('Invalid layer opacity')
+                    layers.append(Layer(lid, str(entry['name']), image,
+                                        bool(entry['visible']), opacity))
+                frames.append(layers)
+            index = int(info.get('active_frame', 0)) if version == 2 else 0
+            if not 0 <= index < len(frames):
+                raise ValueError('Invalid active frame')
+            fps = int(info.get('fps', 12)) if version == 2 else 12
+            if not 1 <= fps <= 60:
+                raise ValueError('Invalid FPS')
             active_id = info.get('active_layer')
-            if active_id not in seen:
-                active_id = layers[-1].id
+            if not any(layer.id == active_id for layer in frames[index]):
+                active_id = frames[index][-1].id
         self.deselect()
         self.width_px, self.height_px = width, height
-        self.layers = layers
+        self.frames = frames
+        self.frame_index = index
+        self.fps = fps
+        self.layers = frames[index]
         self.active_id = active_id
         self.setFixedSize(width, height)
         self._undo.clear()
@@ -636,6 +730,7 @@ class Canvas(QWidget):
         self.dirty = False
         self.dirty_changed.emit()
         self.document_changed.emit()
+        self.frames_changed.emit()
         self.update()
 
 
@@ -643,16 +738,17 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.project_path = None
-        self.resize(1220, 880)
+        self.resize(1370, 930)
         root = QWidget()
         vertical = QVBoxLayout(root)
         toolbar = QHBoxLayout()
         self.canvas = Canvas()
-        self.status = QLabel('Wacom stylus ready | Pick a layer and draw.')
+        self.status = QLabel('Wacom stylus ready | Select a tool and draw.')
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.canvas.diagnostic.connect(self.status.setText)
         self.canvas.dirty_changed.connect(self.refresh_title)
         self.canvas.document_changed.connect(self.refresh_layers)
+        self.canvas.frames_changed.connect(self.refresh_frames)
 
         def button(text, callback):
             item = QPushButton(text)
@@ -661,20 +757,6 @@ class MainWindow(QMainWindow):
             return item
 
         button('Color', self.pick_color)
-        toolbar.addWidget(QLabel('Tool:'))
-        self.tool_combo = QComboBox()
-        self.tool_combo.addItems(['Brush', 'Select Rectangle', 'Move Pixels'])
-        self.tool_combo.currentIndexChanged.connect(lambda index: self.canvas.change_tool(['brush', 'select', 'move'][index]))
-        toolbar.addWidget(self.tool_combo)
-        self.eraser_button = button('Eraser: OFF', self.toggle_eraser)
-        self.eraser_button.setCheckable(True)
-        toolbar.addWidget(QLabel('Size:'))
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(1, 80)
-        self.slider.setValue(self.canvas.size)
-        self.slider.setMaximumWidth(130)
-        self.slider.valueChanged.connect(self.change_size)
-        toolbar.addWidget(self.slider)
         self.undo_button = button('Undo', self.canvas.undo)
         self.redo_button = button('Redo', self.canvas.redo)
         self.undo_button.setEnabled(False)
@@ -688,16 +770,41 @@ class MainWindow(QMainWindow):
         vertical.addLayout(toolbar)
 
         content = QHBoxLayout()
+        left = QVBoxLayout()
+        left.addWidget(QLabel('TOOLS'))
+        self.tool_buttons = {}
+        for tool, text in [('brush','Brush'), ('eraser','Eraser'),
+                           ('select','Rectangle Select'), ('move','Move Pixels')]:
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setMinimumWidth(130)
+            b.clicked.connect(lambda checked, t=tool: self.set_tool(t))
+            self.tool_buttons[tool] = b
+            left.addWidget(b)
+        self.tool_buttons['brush'].setChecked(True)
+        left.addWidget(QLabel('Brush / eraser diameter'))
+        size_row = QHBoxLayout()
+        self.size_input = QSpinBox()
+        self.size_input.setRange(1, 500)
+        self.size_input.setValue(self.canvas.size)
+        self.size_input.setSuffix(' px')
+        self.size_input.valueChanged.connect(self.change_size)
+        size_row.addWidget(self.size_input)
+        left.addLayout(size_row)
+        left.addStretch()
+        content.addLayout(left)
+
         scroll = QScrollArea()
         scroll.setWidget(self.canvas)
         scroll.setWidgetResizable(False)
         scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scroll.viewport().setCursor(Qt.CursorShape.BlankCursor)
         content.addWidget(scroll, 1)
+
         right = QVBoxLayout()
         right.addWidget(QLabel('Layers (top to bottom)'))
         self.layers_list = QListWidget()
-        self.layers_list.setMinimumWidth(180)
+        self.layers_list.setMinimumWidth(185)
         self.layers_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.layers_list.currentItemChanged.connect(self.selection_changed)
         right.addWidget(self.layers_list, 1)
@@ -709,31 +816,102 @@ class MainWindow(QMainWindow):
             b.clicked.connect(fn)
             right.addWidget(b)
         right.addWidget(QLabel('Active layer opacity'))
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(0, 100)
-        self.opacity_slider.setValue(100)
-        self.opacity_slider.setTracking(False)
-        self.opacity_slider.valueChanged.connect(self.canvas.set_opacity)
-        right.addWidget(self.opacity_slider)
+        self.opacity_input = QSpinBox()
+        self.opacity_input.setRange(0, 100)
+        self.opacity_input.setSuffix(' %')
+        self.opacity_input.setValue(100)
+        self.opacity_input.valueChanged.connect(self.canvas.set_opacity)
+        right.addWidget(self.opacity_input)
         content.addLayout(right)
         vertical.addLayout(content, 1)
+
+        self.timeline_container = QWidget()
+        timeline = QVBoxLayout(self.timeline_container)
+        frame_controls = QHBoxLayout()
+        for label, func in [('Previous', lambda: self.canvas.change_frame(self.canvas.frame_index-1)),
+                            ('Next', lambda: self.canvas.change_frame(self.canvas.frame_index+1)),
+                            ('+ Blank', lambda: self.canvas.add_frame(False)),
+                            ('Duplicate', lambda: self.canvas.add_frame(True)),
+                            ('Delete', self.canvas.delete_frame)]:
+            b = QPushButton(label)
+            b.clicked.connect(func)
+            frame_controls.addWidget(b)
+        frame_controls.addWidget(QLabel('FPS:'))
+        self.fps_input = QSpinBox()
+        self.fps_input.setRange(1, 60)
+        self.fps_input.setValue(12)
+        self.fps_input.valueChanged.connect(self.change_fps)
+        frame_controls.addWidget(self.fps_input)
+        self.frame_label = QLabel('Frame 1 / 1')
+        frame_controls.addWidget(self.frame_label)
+        frame_controls.addStretch()
+        timeline.addLayout(frame_controls)
+        self.frame_list = QListWidget()
+        self.frame_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.frame_list.setFlow(QListWidget.Flow.LeftToRight)
+        self.frame_list.setWrapping(False)
+        self.frame_list.setIconSize(__import__('PySide6.QtCore',fromlist=['QSize']).QSize(90,60))
+        self.frame_list.setFixedHeight(108)
+        self.frame_list.setSpacing(5)
+        self.frame_list.currentRowChanged.connect(self.canvas.change_frame)
+        timeline.addWidget(self.frame_list)
+        self.timeline_toggle = QPushButton('Hide Animation Timeline')
+        self.timeline_toggle.clicked.connect(self.toggle_timeline)
+        vertical.addWidget(self.timeline_toggle)
+        vertical.addWidget(self.timeline_container)
         vertical.addWidget(self.status)
         self.setCentralWidget(root)
         self.refresh_layers()
+        self.refresh_frames()
         self.refresh_title()
         for seq, fn in [('Ctrl+Z', self.canvas.undo), ('Ctrl+Shift+Z', self.canvas.redo),
                         ('Ctrl+Y', self.canvas.redo), ('Ctrl+S', self.save_project),
                         ('Ctrl+Shift+S', self.save_project_as), ('Ctrl+O', self.open_project),
-                        ('[', lambda: self.slider.setValue(self.slider.value()-1)),
-                        (']', lambda: self.slider.setValue(self.slider.value()+1)),
+                        ('[', lambda: self.adjust_brush(-1)),
+                        (']', lambda: self.adjust_brush(1)),
                         ('Ctrl+A', self.canvas.select_all), ('Ctrl+D', self.canvas.deselect)]:
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
 
+    def set_tool(self, tool):
+        self.canvas.change_tool(tool)
+        for name, button in self.tool_buttons.items():
+            button.setChecked(name == self.canvas.tool)
+
+    def adjust_brush(self, offset):
+        if QApplication.focusWidget() is self.size_input or QApplication.focusWidget() is self.opacity_input:
+            return
+        self.size_input.setValue(self.size_input.value() + offset)
+
+    def change_fps(self, fps):
+        if self.canvas.fps != fps:
+            self.canvas.fps = fps
+            self.canvas._mark_dirty()
+
+    def toggle_timeline(self):
+        visible = not self.timeline_container.isVisible()
+        self.timeline_container.setVisible(visible)
+        self.timeline_toggle.setText('Hide Animation Timeline' if visible else 'Show Animation Timeline')
+
+    def refresh_frames(self):
+        from PySide6.QtGui import QIcon, QPixmap
+        self.frame_list.blockSignals(True)
+        self.frame_list.clear()
+        for index in range(len(self.canvas.frames)):
+            item = QListWidgetItem(QIcon(QPixmap.fromImage(self.canvas.frame_thumbnail(index))),
+                                   f'Frame {index + 1}')
+            self.frame_list.addItem(item)
+        self.frame_list.setCurrentRow(self.canvas.frame_index)
+        self.frame_list.blockSignals(False)
+        self.frame_label.setText(f'Frame {self.canvas.frame_index + 1} / {len(self.canvas.frames)}')
+        self.fps_input.blockSignals(True)
+        self.fps_input.setValue(self.canvas.fps)
+        self.fps_input.blockSignals(False)
+
     def refresh_title(self):
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.5 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.6 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
@@ -746,9 +924,9 @@ class MainWindow(QMainWindow):
                 self.layers_list.setCurrentItem(item)
         self.layers_list.blockSignals(False)
         layer = self.canvas.active_layer()
-        self.opacity_slider.blockSignals(True)
-        self.opacity_slider.setValue(layer.opacity if layer else 100)
-        self.opacity_slider.blockSignals(False)
+        self.opacity_input.blockSignals(True)
+        self.opacity_input.setValue(layer.opacity if layer else 100)
+        self.opacity_input.blockSignals(False)
 
     def selection_changed(self, current, previous):
         if current is not None:
@@ -772,18 +950,11 @@ class MainWindow(QMainWindow):
         self.canvas.update(old.toAlignedRect())
         self.canvas.refresh_cursor()
 
-    def toggle_eraser(self, checked):
-        self.canvas.eraser = checked
-        self.eraser_button.setText('Eraser: ON' if checked else 'Eraser: OFF')
-        self.canvas.refresh_cursor()
-
     def pick_color(self):
         color = QColorDialog.getColor(self.canvas.color, self, 'Choose brush color')
         if color.isValid():
             self.canvas.color = color
-            self.eraser_button.setChecked(False)
-            self.canvas.eraser = False
-            self.eraser_button.setText("Eraser: OFF")
+            self.set_tool('brush')
 
     def _confirm_discard(self):
         if not self.canvas.dirty:

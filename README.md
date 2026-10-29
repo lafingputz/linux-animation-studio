@@ -1,46 +1,59 @@
-# Linux Animation Studio v0.5
+# Linux Animation Studio v0.6
 
-Python / PySide6 painting prototype for Pop!_OS 24.04 and a Wacom Intuos CTH-490.
+A Python/PySide6 drawing and early frame-by-frame animation prototype for Linux, tested by its developer on Pop!_OS 24.04 with a Wacom Intuos CTH-490 in earlier releases.
 
-## Update from v0.4
+## New in v0.6
 
-On your Mac, unpack this archive and upload `main.py`, `requirements.txt`, `.gitignore`, and `README.md` to the root of your existing GitHub repository. On the Surface:
+- Dedicated left-side Brush, Eraser, Rectangle Select, and Move Pixels tools.
+- Numerical brush size in pixels (1–500), with `[` and `]` changing it one pixel.
+- Numerical layer opacity (0–100%).
+- Collapsible frame timeline. Add blank, duplicate, delete, and select frames.
+- Frame thumbnails and frame navigation.
+- Save animations in `.las` format version 2, and open version 1 files from v0.4/v0.5.
+- Per-frame editable raster layers.
+
+## Install/update
+
+Upload `main.py`, `requirements.txt`, `README.md`, and `.gitignore` to the **root** of your GitHub repository. On your Surface:
 
 ```bash
 cd ~/Projects/linux-animation-studio
 git pull --ff-only
 source .venv/bin/activate
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-No new Python dependencies. Keep backups of important `.las` documents before testing a new build.
+No additional dependencies are introduced over v0.5.
 
-## New tools
+## Important v0.6 limitations
 
-- **Tool selector**: Brush, Select Rectangle, Move Pixels. Brush keeps pressure sensitivity and real transparency eraser from v0.4.
-- **Select Rectangle**: drag to select; Ctrl+A selects the whole canvas, Ctrl+D deselects. Brush and eraser are clipped to the active selection.
-- **Move Pixels**: drag the currently selected region within the active layer, or move all pixels on that layer if nothing is selected. Releasing commits one undoable move. Content moving beyond the canvas boundary is clipped.
-- **Opacity**: click a layer, then adjust the right-hand slider from 0% to 100%; changes are undoable. A committed slider change creates one history entry, rather than one per slider motion.
-- **Save/load**: projects still use v0.4's version-1 `.las` layout; the optional `opacity` field defaults to 100% when opening older projects.
-- Existing Wacom, cursor, clear, layers, PNG, undo/redo, and shortcuts remain.
+- The timeline is **editing-only**: playback and onion skins are planned for v0.7.
+- Frames store independent copies of their layer content (duplicate frame copies the current pose). This is deliberately a small first step toward a full cel/track model.
+- Undo/redo is **per frame**; switching frames resets history. Adding, duplicating and deleting frames are **not yet undoable**. Save a backup before major changes.
+- Layer list structure is currently independent in each frame. A proper persistent layer-track architecture will come later.
+- Brush and eraser use a shared size value for now. Selection, moving, opacity, Wacom drawing, PNG export and cursor handling are inherited from v0.5.
+- `Ctrl+S` saves `.las` in version 2. Earlier builds cannot open v2 projects, so preserve a copy of existing v0.5 artwork.
 
-## Limitations of v0.5
+## Keys
 
-- Rectangular selections only. Selection boundaries are not yet saved in `.las` files.
-- Moves rasterize and commit to the active layer. Scaling, rotation handles, nondestructive transforms, and animation keyframes are **not included yet**.
-- Moving an entire layer may use substantial memory for its undo snapshot, and large canvases remain CPU-rendered.
-- As before, the PNG exporter writes a white background.
+- `Ctrl+Z` Undo / `Ctrl+Shift+Z` or `Ctrl+Y` Redo
+- `Ctrl+S` Save `.las`, `Ctrl+Shift+S` Save As, `Ctrl+O` Open
+- `[` / `]` Brush diameter -/+ 1 px (except when numerical inputs are focused)
+- `Ctrl+A` Select all / `Ctrl+D` Deselect
 
-## Suggested QA
+## Suggested tests
 
-1. Open a v0.4 `.las`, verify its layers, save as a new filename, and reopen.
-2. Draw in a rectangular selection: confirm brush and eraser do not affect outside pixels.
-3. Select a portion of a layer, move it, and verify the source is transparent and other layers unchanged.
-4. Undo and redo the move; move all layer pixels without a selection.
-5. Change layer opacity, undo and redo it; save and reopen to verify opacity.
-6. Try Wacom pen pressure, cursor hover, touchpad maximization, and PNG export.
-7. Confirm you can still rename/reorder/hide/delete layers and undo those actions.
+1. Open an existing v0.5 `.las` project and save a copy under a new name.
+2. Draw using Wacom pressure, switch Brush and Eraser in the left panel.
+3. Type `10` in brush size and test `[` and `]`.
+4. Type `35` in opacity and verify the selected layer changes.
+5. Add a blank frame, draw another pose, return to first frame.
+6. Duplicate a frame, change the copy, verify the original remains unchanged.
+7. Delete a frame and confirm the others survive.
+8. Save/reopen `.las`, verify frame count and contents, opacity and frame selection.
+9. Hide/show the timeline and test PNG export of the active frame.
 
-## Long-term brush roadmap
+## Notes
 
-Multiple brush presets and importing a clipped image as a stamp/brush tip are planned future features; **not implemented in this version**. For clean future integration we'll separate brush presets from the document-layer system.
+Source has been checked for Python syntax; interactive behavior requires testing on the target Pop!_OS machine.
