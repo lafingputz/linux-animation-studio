@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.4: pressure-sensitive raster layers and .las projects."""
+"""Linux Animation Studio v0.5: selections, moves, opacity, and .las projects."""
 import io
 import json
 import sys
@@ -7,12 +7,12 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSlider, QVBoxLayout, QWidget, QInputDialog,
+    QSlider, QVBoxLayout, QWidget, QInputDialog, QComboBox,
 )
 
 WIDTH, HEIGHT = 1200, 800
@@ -52,6 +52,7 @@ class Layer:
     name: str
     image: QImage
     visible: bool = True
+    opacity: int = 100
 
 
 class Canvas(QWidget):
@@ -68,6 +69,14 @@ class Canvas(QWidget):
         self.color = QColor('#222222')
         self.size = 12
         self.eraser = False
+        self.tool = "brush"  # brush, select, move
+        self.selection = None  # QRect in document pixels
+        self.drag_origin = None
+        self.drag_rect = None
+        self.move_source = None
+        self.move_preview = None
+        self.move_offset = QPoint(0, 0)
+        self.move_layer_id = None
         self.drawing = False
         self.input_kind = None
         self.last = None
@@ -102,7 +111,7 @@ class Canvas(QWidget):
         pos = self.hover_position if pos is None else pos
         if pos is None:
             return QRectF()
-        diameter = self.size if self.eraser else self.size * (0.15 + 0.85 * self.hover_pressure)
+        diameter = (self.size if self.eraser else self.size * (0.15 + 0.85 * self.hover_pressure)) if self.tool == "brush" else 8
         radius = max(3.0, diameter / 2.0)
         return QRectF(pos.x() - radius - 4, pos.y() - radius - 4,
                       2 * radius + 8, 2 * radius + 8)
@@ -138,7 +147,9 @@ class Canvas(QWidget):
         painter = QPainter(image)
         for layer in self.layers:  # bottom-to-top
             if layer.visible:
+                painter.setOpacity(layer.opacity / 100.0)
                 painter.drawImage(0, 0, layer.image)
+                painter.setOpacity(1.0)
         painter.end()
         return image
 
@@ -147,12 +158,41 @@ class Canvas(QWidget):
         p.fillRect(self.rect(), Qt.GlobalColor.white)
         for layer in self.layers:
             if layer.visible:
+                p.setOpacity(layer.opacity / 100.0)
                 p.drawImage(0, 0, layer.image)
+                p.setOpacity(1.0)
+        if self.move_preview is not None and self.move_layer_id is not None:
+            layer = self.layer_by_id(self.move_layer_id)
+            if layer is not None:
+                # Preview the source pixels at their destination without permanently changing the layer.
+                preview_layer = layer.image.copy()
+                ghost = QPainter(preview_layer)
+                ghost.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+                ghost.fillRect(self.move_source_rect, Qt.GlobalColor.transparent)
+                ghost.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                ghost.drawImage(self.move_preview.topLeft(), self.move_source)
+                ghost.end()
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                p.setOpacity(1.0)
+                p.fillRect(self.rect(), Qt.GlobalColor.white)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                for drawn_layer in self.layers:
+                    if drawn_layer.visible:
+                        p.setOpacity(drawn_layer.opacity / 100.0)
+                        p.drawImage(0, 0, preview_layer if drawn_layer.id == layer.id else drawn_layer.image)
+                p.setOpacity(1.0)
+        outlined = self.drag_rect if self.drag_rect is not None else self.selection
+        if outlined is not None and not outlined.isEmpty():
+            p.setPen(QPen(QColor(255,255,255), 1, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(outlined)
+            p.setPen(QPen(QColor(10,10,10), 1, Qt.PenStyle.DotLine))
+            p.drawRect(outlined.adjusted(1,1,-1,-1))
         if self.hover_position is not None:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             diameter = self.size if self.eraser else self.size * (0.15 + 0.85 * self.hover_pressure)
             center = self.hover_position
-            if self.eraser:
+            if self.eraser and self.tool == "brush":
                 r = diameter / 2.0
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(QColor(255, 255, 255, 220), 2))
@@ -240,6 +280,8 @@ class Canvas(QWidget):
             pen = QPen(self.color, width, Qt.PenStyle.SolidLine,
                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
+        if self.selection is not None:
+            painter.setClipRect(self.selection)
         if self.last is None:
             painter.drawPoint(point)
         else:
@@ -362,6 +404,100 @@ class Canvas(QWidget):
         self._apply(cmd, True)
         self._push(cmd)
 
+    def set_opacity(self, value):
+        layer = self.active_layer()
+        if layer is None or layer.opacity == value or self.drawing:
+            return
+        value = max(0, min(100, int(value)))
+        cmd = dict(type='property', id=layer.id, field='opacity',
+                   before=layer.opacity, after=value)
+        self._apply(cmd, True)
+        self._push(cmd)
+
+    def change_tool(self, tool):
+        if self.drawing or self.drag_origin is not None:
+            return
+        self.tool = tool
+        self.refresh_cursor()
+
+    def set_selection(self, rect):
+        self.selection = rect.intersected(QRect(0, 0, self.width_px, self.height_px)) if rect else None
+        if self.selection is not None and self.selection.isEmpty():
+            self.selection = None
+        self.update()
+
+    def select_all(self):
+        self.set_selection(QRect(0, 0, self.width_px, self.height_px))
+
+    def deselect(self):
+        self.set_selection(None)
+
+    def _point(self, position):
+        return QPoint(max(0, min(self.width_px-1, int(position.x()))),
+                      max(0, min(self.height_px-1, int(position.y()))))
+
+    def _start_interaction(self, position):
+        point = self._point(position)
+        if self.tool == 'select':
+            self.drag_origin = point
+            self.drag_rect = QRect(point, point).normalized()
+            self.update()
+        elif self.tool == 'move':
+            layer = self.active_layer()
+            if layer is None or not layer.visible:
+                self.diagnostic.emit('Select a visible layer to move.')
+                return
+            self.drag_origin = point
+            self.move_layer_id = layer.id
+            self.move_source_rect = self.selection or layer.image.rect()
+            self.move_source = layer.image.copy(self.move_source_rect)
+            self.move_preview = QRect(self.move_source_rect)
+            self.move_offset = QPoint(0, 0)
+            self.update()
+
+    def _update_interaction(self, position):
+        if self.drag_origin is None:
+            return
+        point = self._point(position)
+        if self.tool == 'select':
+            self.drag_rect = QRect(self.drag_origin, point).normalized().adjusted(0, 0, 1, 1)
+        elif self.tool == 'move' and self.move_preview is not None:
+            self.move_offset = point - self.drag_origin
+            self.move_preview = self.move_source_rect.translated(self.move_offset)
+        self.update()
+
+    def _finish_interaction(self, position):
+        if self.drag_origin is None:
+            return
+        self._update_interaction(position)
+        if self.tool == 'select':
+            self.set_selection(self.drag_rect)
+            self.drag_rect = None
+        elif self.tool == 'move' and self.move_source is not None:
+            layer = self.layer_by_id(self.move_layer_id)
+            if layer is not None and not self.move_offset.isNull():
+                source = self.move_source_rect
+                destination = source.translated(self.move_offset)
+                affected = source.united(destination).intersected(layer.image.rect())
+                before = layer.image.copy(affected)
+                painter = QPainter(layer.image)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+                painter.fillRect(source, Qt.GlobalColor.transparent)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                painter.drawImage(destination.topLeft(), self.move_source)
+                painter.end()
+                after = layer.image.copy(affected)
+                if before != after:
+                    self._push(dict(type='patch', id=layer.id, rect=affected,
+                                    before=before, after=after))
+                if self.selection is not None:
+                    self.selection = destination.intersected(layer.image.rect())
+            self.move_preview = None
+            self.move_source = None
+            self.move_layer_id = None
+        self.drag_origin = None
+        self.update()
+
     def select_layer(self, layer_id):
         if not self.drawing and self.layer_by_id(layer_id):
             self.active_id = layer_id
@@ -389,14 +525,22 @@ class Canvas(QWidget):
         name = device.name() if device else 'Unknown tablet'
         if typ == QEvent.Type.TabletPress:
             self.ignore_mouse = True
-            self._begin_stroke('tablet')
-            self.stroke(event.position(), pressure, True)
-        elif typ == QEvent.Type.TabletMove and self.drawing and self.input_kind == 'tablet':
-            self.stroke(event.position(), pressure, True)
+            if self.tool == "brush":
+                self._begin_stroke('tablet')
+                self.stroke(event.position(), pressure, True)
+            else:
+                self._start_interaction(event.position())
+        elif typ == QEvent.Type.TabletMove:
+            if self.drawing and self.input_kind == 'tablet':
+                self.stroke(event.position(), pressure, True)
+            elif self.drag_origin is not None:
+                self._update_interaction(event.position())
         elif typ == QEvent.Type.TabletRelease:
             if self.drawing and self.input_kind == 'tablet':
                 self.stroke(event.position(), pressure, True)
                 self._end_stroke()
+            if self.drag_origin is not None:
+                self._finish_interaction(event.position())
             self.ignore_mouse = False
         self.diagnostic.emit(f'TABLET: {name} | pressure: {pressure:.3f} | tilt: '
                              f'{event.xTilt():.0f}, {event.yTilt():.0f} | {typ.name}')
@@ -405,8 +549,11 @@ class Canvas(QWidget):
     def mousePressEvent(self, event):
         self.show_hover(event.position(), 1.0)
         if not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton:
-            self._begin_stroke('mouse')
-            self.stroke(event.position(), 1.0, False)
+            if self.tool == 'brush':
+                self._begin_stroke('mouse')
+                self.stroke(event.position(), 1.0, False)
+            else:
+                self._start_interaction(event.position())
             self.diagnostic.emit('MOUSE input (fixed width; no pressure)')
         event.accept()
 
@@ -416,18 +563,23 @@ class Canvas(QWidget):
         if (not self.ignore_mouse and self.drawing and self.input_kind == 'mouse'
                 and event.buttons() & Qt.MouseButton.LeftButton):
             self.stroke(event.position(), 1.0, False)
+        elif self.drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self._update_interaction(event.position())
         event.accept()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.input_kind == 'mouse':
-            self._end_stroke()
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.input_kind == 'mouse':
+                self._end_stroke()
+            if self.drag_origin is not None:
+                self._finish_interaction(event.position())
         event.accept()
 
     def save_project(self, path):
         manifest = dict(format='linux-animation-studio', version=PROJECT_VERSION,
                         width=self.width_px, height=self.height_px,
                         active_layer=self.active_id,
-                        layers=[dict(id=x.id, name=x.name, visible=x.visible,
+                        layers=[dict(id=x.id, name=x.name, visible=x.visible, opacity=x.opacity,
                                      file=f'layers/{x.id}.png') for x in self.layers])
         path = Path(path)
         temporary = path.with_name(path.name + '.tmp')
@@ -466,10 +618,14 @@ class Canvas(QWidget):
                 if entry['file'] != f'layers/{lid}.png':
                     raise ValueError('Invalid layer asset path')
                 image = image_from_bytes(archive.read(entry['file']), width, height)
-                layers.append(Layer(lid, str(entry['name']), image, bool(entry['visible'])))
+                opacity = int(entry.get('opacity', 100))
+                if not 0 <= opacity <= 100:
+                    raise ValueError('Invalid layer opacity')
+                layers.append(Layer(lid, str(entry['name']), image, bool(entry['visible']), opacity))
             active_id = info.get('active_layer')
             if active_id not in seen:
                 active_id = layers[-1].id
+        self.deselect()
         self.width_px, self.height_px = width, height
         self.layers = layers
         self.active_id = active_id
@@ -505,6 +661,11 @@ class MainWindow(QMainWindow):
             return item
 
         button('Color', self.pick_color)
+        toolbar.addWidget(QLabel('Tool:'))
+        self.tool_combo = QComboBox()
+        self.tool_combo.addItems(['Brush', 'Select Rectangle', 'Move Pixels'])
+        self.tool_combo.currentIndexChanged.connect(lambda index: self.canvas.change_tool(['brush', 'select', 'move'][index]))
+        toolbar.addWidget(self.tool_combo)
         self.eraser_button = button('Eraser: OFF', self.toggle_eraser)
         self.eraser_button.setCheckable(True)
         toolbar.addWidget(QLabel('Size:'))
@@ -520,6 +681,7 @@ class MainWindow(QMainWindow):
         self.redo_button.setEnabled(False)
         self.canvas.history_changed.connect(self.update_history)
         button('Clear Layer', self.canvas.clear)
+        button('Deselect', self.canvas.deselect)
         button('Open .las', self.open_project)
         button('Save .las', self.save_project)
         button('Export PNG', self.export_png)
@@ -546,6 +708,13 @@ class MainWindow(QMainWindow):
             b = QPushButton(label)
             b.clicked.connect(fn)
             right.addWidget(b)
+        right.addWidget(QLabel('Active layer opacity'))
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setTracking(False)
+        self.opacity_slider.valueChanged.connect(self.canvas.set_opacity)
+        right.addWidget(self.opacity_slider)
         content.addLayout(right)
         vertical.addLayout(content, 1)
         vertical.addWidget(self.status)
@@ -556,14 +725,15 @@ class MainWindow(QMainWindow):
                         ('Ctrl+Y', self.canvas.redo), ('Ctrl+S', self.save_project),
                         ('Ctrl+Shift+S', self.save_project_as), ('Ctrl+O', self.open_project),
                         ('[', lambda: self.slider.setValue(self.slider.value()-1)),
-                        (']', lambda: self.slider.setValue(self.slider.value()+1))]:
+                        (']', lambda: self.slider.setValue(self.slider.value()+1)),
+                        ('Ctrl+A', self.canvas.select_all), ('Ctrl+D', self.canvas.deselect)]:
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
 
     def refresh_title(self):
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.4 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.5 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
@@ -575,10 +745,15 @@ class MainWindow(QMainWindow):
             if layer.id == self.canvas.active_id:
                 self.layers_list.setCurrentItem(item)
         self.layers_list.blockSignals(False)
+        layer = self.canvas.active_layer()
+        self.opacity_slider.blockSignals(True)
+        self.opacity_slider.setValue(layer.opacity if layer else 100)
+        self.opacity_slider.blockSignals(False)
 
     def selection_changed(self, current, previous):
         if current is not None:
             self.canvas.select_layer(current.data(Qt.ItemDataRole.UserRole))
+            self.refresh_layers()
 
     def rename_layer(self):
         layer = self.canvas.active_layer()
@@ -607,6 +782,8 @@ class MainWindow(QMainWindow):
         if color.isValid():
             self.canvas.color = color
             self.eraser_button.setChecked(False)
+            self.canvas.eraser = False
+            self.eraser_button.setText("Eraser: OFF")
 
     def _confirm_discard(self):
         if not self.canvas.dirty:
