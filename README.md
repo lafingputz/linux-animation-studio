@@ -1,12 +1,55 @@
-# Linux Animation Studio v0.3
+# Linux Animation Studio v0.4
 
-Drop-in update for v0.2. Tested by syntax compilation; stylus/Wayland behavior needs checking on the Surface Pro 3.
+Native PySide6 sketching prototype for Pop!_OS 24.04 LTS and Wacom Intuos CTH-490.
 
-## Updating via GitHub
+## Run
 
-On your main computer, unzip this archive and upload the **contents** (`main.py`, `requirements.txt`, `.gitignore`, `README.md`) into the **root** of your existing `linux-animation-studio` repository. Do not upload the enclosing v0.3 folder, `.venv`, or caches. Commit changes to `main`.
+```bash
+cd ~/Projects/linux-animation-studio
+source .venv/bin/activate
+python main.py
+```
 
-On the Surface:
+No new dependencies beyond PySide6.
+
+## Features
+
+- Pressure-sensitive Wacom drawing (retained from v0.3)
+- Cursor dot / size-aware eraser circle, including Wayland window-state refresh
+- True transparent RGBA raster layers, drawn bottom-to-top
+- Add, delete, rename, hide/show and reorder layers
+- Erase transparency on selected visible layer
+- Layer-aware stroke undo/redo, plus undoable layer edits and clear
+- Save / reopen editable `.las` project (ZIP archive with PNG layers and manifest)
+- Export composited, white-background PNG of visible layers
+- Save shortcut `Ctrl+S`, Save As `Ctrl+Shift+S`, Open `Ctrl+O`
+- Undo `Ctrl+Z`, Redo `Ctrl+Shift+Z` or `Ctrl+Y`; size `[` and `]`
+
+## Important
+
+- **Clear Layer** clears only the selected layer, not the full document.
+- The white canvas is a display background; individual raster layers are transparent.
+- Hidden layers are preserved in `.las` but omitted from exported PNG.
+- `.las` files do not currently include undo history. Save before closing.
+- The viewport is fixed at 1200x800 by default. No zoom, selections, animation, blend modes or layer opacity yet.
+- History is limited to 50 actions / approximately 96 MiB; very large operations can exceed the budget as a single action.
+- The drawing engine currently uses a full-layer snapshot **temporarily during each stroke** and stores cropped before/after patches in history. This is not yet an optimized tiled renderer.
+- New/open prompts about discarding unsaved data; no autosave yet.
+- This release has been syntax-tested and tested with offscreen Qt where available. Test actual tablet pressure and cursor behavior on your Surface.
+
+## Suggested manual checks
+
+1. Draw on Layer 1, add Layer 2, draw across it, then hide Layer 2.
+2. Select Layer 2, erase a hole, and check the Layer 1 art appears beneath it.
+3. Reorder and rename layers; undo and redo these actions.
+4. Clear the selected layer then undo.
+5. Save `.las`, close/restart the program, reopen it and verify all layers.
+6. Export PNG and confirm hidden layers are excluded.
+7. Test Wacom pressure and cursor handling after maximizing with the touchpad.
+
+## GitHub workflow
+
+On your main computer, unzip the release and upload `main.py`, `requirements.txt`, `.gitignore`, and `README.md` to the repository root. On your Surface:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -14,25 +57,3 @@ git pull --ff-only
 source .venv/bin/activate
 python main.py
 ```
-
-Dependencies are unchanged from v0.2.
-
-## New
-
-- Undo (`Ctrl+Z`) and redo (`Ctrl+Shift+Z` or `Ctrl+Y`) buttons and shortcuts.
-- Each pen/mouse stroke is a single undo action; Clear is undoable.
-- History stores cropped image patches for strokes, rather than a full-canvas snapshot per stroke. A single full-canvas temporary copy exists while a stroke is in progress. History is capped at 50 undo actions / approximately 96 MiB (except an individual large operation).
-- `[` / `]` adjust brush size by one pixel.
-- `Ctrl+S` opens the existing PNG export dialog. **This is not yet native project saving.**
-- Restores the blank OS pointer on canvas entry, pointer updates, and window-state changes. Cursor bug fix is provisional until tested on Pop!_OS Wayland.
-
-## Testing
-
-1. Make three separate strokes. Undo three times and redo three times.
-2. Undo one stroke, draw a new stroke: redo must no longer restore the old stroke.
-3. Clear, undo, redo.
-4. Draw using pressure and hover the stylus over the canvas, then maximize with your touchpad and return to canvas. The arrow should disappear.
-5. Change size using `[` and `]`; check the eraser circle follows the new size.
-6. Export PNG and confirm the custom cursor is not exported.
-
-Known limitations: White-paint eraser (not real transparency); no layers, project file, or animation yet. While a stroke is active, undo/redo are ignored. A long stroke may redraw a relatively large region; more sophisticated tiles come later.
