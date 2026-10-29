@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.8: project workflow and animation export."""
+"""Linux Animation Studio v0.9: keyframed motion objects."""
 import io
 import math
 import shutil
@@ -9,6 +9,7 @@ import sys
 import uuid
 import zipfile
 from dataclasses import dataclass
+from bisect import bisect_left
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
 
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
-PROJECT_VERSION = 2
+PROJECT_VERSION = 3
 MAX_STEPS = 50
 MAX_HISTORY_BYTES = 96 * 1024 * 1024
 
@@ -59,6 +60,30 @@ class Layer:
     opacity: int = 100
 
 
+@dataclass
+class MotionObject:
+    id: str
+    name: str
+    image: QImage
+    # frame number -> (offset x, offset y, scale percent, rotation degrees)
+    keys: dict
+
+
+def interpolated_transform(keys, frame):
+    """Linear interpolation, with endpoint holds; pure Python and unit-testable."""
+    if not keys:
+        return (0.0, 0.0, 100.0, 0.0)
+    indices = sorted(keys)
+    if frame <= indices[0]:
+        return tuple(keys[indices[0]])
+    if frame >= indices[-1]:
+        return tuple(keys[indices[-1]])
+    j = bisect_left(indices, frame)
+    left, right = indices[j - 1], indices[j]
+    t = (frame - left) / (right - left)
+    return tuple(a + (b - a) * t for a, b in zip(keys[left], keys[right]))
+
+
 class Canvas(QWidget):
     diagnostic = Signal(str)
     history_changed = Signal(bool, bool)
@@ -66,6 +91,7 @@ class Canvas(QWidget):
     dirty_changed = Signal()
     frames_changed = Signal()
     playhead_changed = Signal(int)
+    motion_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -96,6 +122,8 @@ class Canvas(QWidget):
         self._redo = []
         self.dirty = False
         self.frames = [self.layers]
+        self.motion_objects = []
+        self.active_motion_id = None
         self.frame_index = 0
         self.fps = 12
         self.onion_enabled = False
@@ -154,6 +182,65 @@ class Canvas(QWidget):
     def layer_by_id(self, layer_id):
         return next((x for x in self.layers if x.id == layer_id), None)
 
+    def active_motion(self):
+        return next((obj for obj in self.motion_objects if obj.id == self.active_motion_id), None)
+
+    def draw_motion_objects(self, painter, index):
+        # The source is immutable; transforms happen only while compositing.
+        for obj in self.motion_objects:
+            dx, dy, percent, degrees = interpolated_transform(obj.keys, index)
+            painter.save()
+            cx, cy = self.width_px / 2.0, self.height_px / 2.0
+            painter.translate(cx + dx, cy + dy)
+            painter.rotate(degrees)
+            painter.scale(percent / 100.0, percent / 100.0)
+            painter.drawImage(QPointF(-cx, -cy), obj.image)
+            painter.restore()
+
+    def make_motion_from_layer(self):
+        if self.playing or self.drawing or self.drag_origin is not None:
+            raise ValueError('Stop drawing/playback before making a motion object')
+        layer = self.active_layer()
+        if layer is None:
+            raise ValueError('Select a layer first')
+        # Moving the pixels into an independent object avoids drawing them twice.
+        # We deliberately do not change other animation frames.
+        if len(self.motion_objects) >= 20:
+            raise ValueError('The prototype supports up to 20 motion objects')
+        obj = MotionObject(uuid.uuid4().hex, layer.name + ' (motion)', layer.image.copy(),
+                           {self.frame_index: (0.0, 0.0, 100.0, 0.0)})
+        layer.image = transparent_image(self.width_px, self.height_px)
+        self.motion_objects.append(obj)
+        self.active_motion_id = obj.id
+        self._undo.clear()
+        self._redo.clear()
+        self.history_changed.emit(False, False)
+        self._mark_dirty()
+        self._notify_layers()
+        self.motion_changed.emit()
+        return obj
+
+    def set_motion_key(self, x, y, scale, angle):
+        obj = self.active_motion()
+        if obj is None:
+            raise ValueError('Create or select a motion object first')
+        if self.playing:
+            raise ValueError('Pause playback before editing keyframes')
+        obj.keys[self.frame_index] = (float(x), float(y), float(scale), float(angle))
+        self._mark_dirty()
+        self.motion_changed.emit()
+        self.frames_changed.emit()
+        self.update()
+
+    def delete_motion_key(self):
+        obj = self.active_motion()
+        if obj is not None and self.frame_index in obj.keys and len(obj.keys) > 1:
+            del obj.keys[self.frame_index]
+            self._mark_dirty()
+            self.motion_changed.emit()
+            self.frames_changed.emit()
+            self.update()
+
     def composite(self, white_background=False):
         image = QImage(self.width_px, self.height_px, IMAGE_FORMAT)
         image.fill(Qt.GlobalColor.white if white_background else Qt.GlobalColor.transparent)
@@ -163,6 +250,7 @@ class Canvas(QWidget):
                 painter.setOpacity(layer.opacity / 100.0)
                 painter.drawImage(0, 0, layer.image)
                 painter.setOpacity(1.0)
+        self.draw_motion_objects(painter, self.frame_index)
         painter.end()
         return image
 
@@ -177,6 +265,7 @@ class Canvas(QWidget):
             if layer.visible:
                 painter.setOpacity(layer.opacity / 100.0)
                 painter.drawImage(0, 0, layer.image)
+        self.draw_motion_objects(painter, index)
         painter.end()
         painter = QPainter(source)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
@@ -200,6 +289,7 @@ class Canvas(QWidget):
                 p.setOpacity(layer.opacity / 100.0)
                 p.drawImage(0, 0, layer.image)
                 p.setOpacity(1.0)
+        self.draw_motion_objects(p, self.frame_index)
         if self.move_preview is not None and self.move_layer_id is not None:
             layer = self.layer_by_id(self.move_layer_id)
             if layer is not None:
@@ -220,6 +310,7 @@ class Canvas(QWidget):
                         p.setOpacity(drawn_layer.opacity / 100.0)
                         p.drawImage(0, 0, preview_layer if drawn_layer.id == layer.id else drawn_layer.image)
                 p.setOpacity(1.0)
+                self.draw_motion_objects(p, self.frame_index)
         outlined = None if self.playing else (self.drag_rect if self.drag_rect is not None else self.selection)
         if outlined is not None and not outlined.isEmpty():
             p.setPen(QPen(QColor(255,255,255), 1, Qt.PenStyle.DashLine))
@@ -655,7 +746,8 @@ class Canvas(QWidget):
         self.frame_index = index
         self.layers = self.frames[index]
         self.active_id = self.layers[-1].id
-        self._finish_frame_change(mark_dirty=not playback)
+        self._finish_frame_change(mark_dirty=False)
+        self.motion_changed.emit()
 
     def add_frame(self, duplicate=False):
         if self.drawing or self.drag_origin is not None or len(self.frames) >= 120:
@@ -669,12 +761,22 @@ class Canvas(QWidget):
         self.frame_index += 1
         self.layers = layers
         self.active_id = layers[-1].id
+        # Insert an extra cel in the timeline; keyframe positions shift with it.
+        for obj in self.motion_objects:
+            obj.keys = {k + 1 if k >= self.frame_index else k: v for k, v in obj.keys.items()}
+        self.motion_changed.emit()
         self._finish_frame_change()
 
     def delete_frame(self):
         if self.drawing or self.drag_origin is not None or len(self.frames) <= 1:
             return
+        removed = self.frame_index
         del self.frames[self.frame_index]
+        for obj in self.motion_objects:
+            obj.keys = {k - 1 if k > removed else k: v for k, v in obj.keys.items() if k != removed}
+            if not obj.keys:
+                obj.keys = {0: (0.0, 0.0, 100.0, 0.0)}
+        self.motion_changed.emit()
         self.frame_index = min(self.frame_index, len(self.frames) - 1)
         self.layers = self.frames[self.frame_index]
         self.active_id = self.layers[-1].id
@@ -688,6 +790,7 @@ class Canvas(QWidget):
             if layer.visible:
                 p.setOpacity(layer.opacity / 100.0)
                 p.drawImage(0, 0, layer.image)
+        self.draw_motion_objects(p, index)
         p.end()
         return result.scaled(90, 60, Qt.AspectRatioMode.KeepAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
@@ -702,6 +805,7 @@ class Canvas(QWidget):
                 painter.setOpacity(layer.opacity / 100.0)
                 painter.drawImage(0, 0, layer.image)
                 painter.setOpacity(1.0)
+        self.draw_motion_objects(painter, index)
         painter.end()
         return image
 
@@ -715,6 +819,9 @@ class Canvas(QWidget):
         self.width_px, self.height_px = width, height
         self.layers = [Layer(uuid.uuid4().hex, 'Layer 1', transparent_image(width, height))]
         self.frames = [self.layers]
+        self.motion_objects = []
+        self.active_motion_id = None
+        self.motion_changed.emit()
         self.active_id = self.layers[0].id
         self.frame_index = 0
         self.fps = 12
@@ -737,7 +844,7 @@ class Canvas(QWidget):
                         width=self.width_px, height=self.height_px,
                         active_frame=self.frame_index, fps=self.fps,
                         onion_enabled=self.onion_enabled, onion_opacity=self.onion_opacity,
-                        loop_playback=getattr(self, 'loop_playback', True), frames=[])
+                        loop_playback=getattr(self, 'loop_playback', True), frames=[], motion_objects=[])
         path = Path(path)
         temporary = path.with_name(path.name + '.tmp')
         try:
@@ -750,6 +857,12 @@ class Canvas(QWidget):
                                             opacity=layer.opacity, file=filename))
                         archive.writestr(filename, png_bytes(layer.image))
                     manifest['frames'].append(dict(layers=records))
+                for obj in self.motion_objects:
+                    filename = f'motion/{obj.id}.png'
+                    archive.writestr(filename, png_bytes(obj.image))
+                    manifest['motion_objects'].append(dict(id=obj.id, name=obj.name, file=filename,
+                        keys={str(k): list(v) for k, v in obj.keys.items()}))
+                manifest['active_motion_id'] = self.active_motion_id
                 manifest['active_layer'] = self.active_id
                 archive.writestr('manifest.json', json.dumps(manifest, indent=2))
                 archive.writestr('preview.png', png_bytes(self.composite(True)))
@@ -765,7 +878,7 @@ class Canvas(QWidget):
         with zipfile.ZipFile(path, 'r') as archive:
             info = json.loads(archive.read('manifest.json'))
             version = info.get('version')
-            if info.get('format') != 'linux-animation-studio' or version not in (1, 2):
+            if info.get('format') != 'linux-animation-studio' or version not in (1, 2, 3):
                 raise ValueError('Unsupported .las project format/version')
             width, height = int(info['width']), int(info['height'])
             if not (1 <= width <= 8192 and 1 <= height <= 8192):
@@ -796,18 +909,46 @@ class Canvas(QWidget):
                     layers.append(Layer(lid, str(entry['name']), image,
                                         bool(entry['visible']), opacity))
                 frames.append(layers)
-            index = int(info.get('active_frame', 0)) if version == 2 else 0
+            index = int(info.get('active_frame', 0)) if version >= 2 else 0
             if not 0 <= index < len(frames):
                 raise ValueError('Invalid active frame')
-            fps = int(info.get('fps', 12)) if version == 2 else 12
+            fps = int(info.get('fps', 12)) if version >= 2 else 12
             if not 1 <= fps <= 60:
                 raise ValueError('Invalid FPS')
+            motion_objects = []
+            if version >= 3:
+                for rec in info.get('motion_objects', []):
+                    oid = rec['id']
+                    if not isinstance(oid, str) or not oid.isalnum():
+                        raise ValueError('Invalid motion object ID')
+                    filename = f'motion/{oid}.png'
+                    if rec.get('file') != filename:
+                        raise ValueError('Invalid motion asset path')
+                    keys = {}
+                    for key, values in rec['keys'].items():
+                        frame_number = int(key)
+                        values = tuple(float(v) for v in values)
+                        if not (0 <= frame_number < len(frames) and len(values) == 4 and
+                                all(math.isfinite(v) for v in values) and 1 <= values[2] <= 400):
+                            raise ValueError('Invalid keyframe')
+                        keys[frame_number] = values
+                    if not keys:
+                        raise ValueError('Motion objects need at least one keyframe')
+                    motion_objects.append(MotionObject(oid, str(rec['name']),
+                        image_from_bytes(archive.read(filename), width, height), keys))
+                if len(motion_objects) > 20:
+                    raise ValueError('Too many motion objects')
             active_id = info.get('active_layer')
             if not any(layer.id == active_id for layer in frames[index]):
                 active_id = frames[index][-1].id
         self.deselect()
         self.width_px, self.height_px = width, height
         self.frames = frames
+        self.motion_objects = motion_objects
+        saved_motion = info.get('active_motion_id')
+        self.active_motion_id = (saved_motion if any(o.id == saved_motion for o in motion_objects)
+                                 else (motion_objects[-1].id if motion_objects else None))
+        self.motion_changed.emit()
         self.frame_index = index
         self.fps = fps
         self.onion_enabled = bool(info.get('onion_enabled', False))
@@ -994,6 +1135,34 @@ class MainWindow(QMainWindow):
         play_controls.addWidget(self.onion_spin)
         play_controls.addStretch()
         timeline.addLayout(play_controls)
+        motion_controls = QHBoxLayout()
+        self.motion_create = QPushButton('Make Motion Object from Layer')
+        self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
+        self.motion_create.clicked.connect(self.create_motion_object)
+        motion_controls.addWidget(self.motion_create)
+        self.motion_select = QComboBox()
+        self.motion_select.setMinimumWidth(150)
+        self.motion_select.currentIndexChanged.connect(self.choose_motion_object)
+        motion_controls.addWidget(self.motion_select)
+        self.motion_inputs = []
+        for name, low, high, value in [('X', -8192, 8192, 0), ('Y', -8192, 8192, 0),
+                                      ('Scale %', 1, 400, 100), ('Angle °', -360, 360, 0)]:
+            motion_controls.addWidget(QLabel(name))
+            spin = QSpinBox()
+            spin.setRange(low, high)
+            spin.setValue(value)
+            spin.setMaximumWidth(80)
+            spin.editingFinished.connect(self.return_canvas_focus)
+            motion_controls.addWidget(spin)
+            self.motion_inputs.append(spin)
+        add_key = QPushButton('Set Keyframe')
+        add_key.clicked.connect(self.set_motion_keyframe)
+        motion_controls.addWidget(add_key)
+        remove_key = QPushButton('Remove Keyframe')
+        remove_key.clicked.connect(self.remove_motion_keyframe)
+        motion_controls.addWidget(remove_key)
+        timeline.addLayout(motion_controls)
+        self.canvas.motion_changed.connect(self.refresh_motion)
         self.frame_list = QListWidget()
         self.frame_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.frame_list.setFlow(QListWidget.Flow.LeftToRight)
@@ -1039,6 +1208,45 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
+
+    def create_motion_object(self):
+        try:
+            self.pause_playback()
+            self.canvas.make_motion_from_layer()
+            self.refresh_motion()
+        except Exception as exc:
+            QMessageBox.warning(self, 'Motion object', str(exc))
+
+    def choose_motion_object(self, index):
+        if index >= 0:
+            self.canvas.active_motion_id = self.motion_select.itemData(index)
+            self.refresh_motion()
+
+    def refresh_motion(self):
+        self.motion_select.blockSignals(True)
+        self.motion_select.clear()
+        for obj in self.canvas.motion_objects:
+            self.motion_select.addItem(obj.name, obj.id)
+        for i, obj in enumerate(self.canvas.motion_objects):
+            if obj.id == self.canvas.active_motion_id:
+                self.motion_select.setCurrentIndex(i)
+                break
+        self.motion_select.blockSignals(False)
+        obj = self.canvas.active_motion()
+        values = interpolated_transform(obj.keys, self.canvas.frame_index) if obj else (0, 0, 100, 0)
+        for spin, value in zip(self.motion_inputs, values):
+            spin.blockSignals(True)
+            spin.setValue(round(value))
+            spin.blockSignals(False)
+
+    def set_motion_keyframe(self):
+        try:
+            self.canvas.set_motion_key(*(spin.value() for spin in self.motion_inputs))
+        except Exception as exc:
+            QMessageBox.warning(self, 'Keyframe', str(exc))
+
+    def remove_motion_keyframe(self):
+        self.canvas.delete_motion_key()
 
     def return_canvas_focus(self):
         self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -1126,6 +1334,7 @@ class MainWindow(QMainWindow):
         self.frame_list.setCurrentRow(index)
         self.frame_list.blockSignals(False)
         self.frame_label.setText(f'Frame {index + 1} / {len(self.canvas.frames)}')
+        self.refresh_motion()
 
     def refresh_frames(self):
         from PySide6.QtGui import QIcon, QPixmap
@@ -1150,13 +1359,14 @@ class MainWindow(QMainWindow):
         self.loop_checkbox.blockSignals(True)
         self.loop_checkbox.setChecked(getattr(self.canvas, 'loop_playback', True))
         self.loop_checkbox.blockSignals(False)
+        self.refresh_motion()
 
     def refresh_title(self):
         if not self.project_active:
-            self.setWindowTitle('Linux Animation Studio v0.8 - No project open')
+            self.setWindowTitle('Linux Animation Studio v0.9 - No project open')
             return
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.8 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.9 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
