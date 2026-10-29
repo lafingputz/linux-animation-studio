@@ -1,9 +1,10 @@
-# Linux Animation Studio v0.9 (motion keyframes prototype)
+# Linux Animation Studio v0.10
 
-Builds directly on v0.8. Traditional frame drawings, pen input, layers, playback, PNG and MP4 export remain.
+Persistent animation layer tracks and frame-step shortcuts. Tested with Python syntax compilation; GUI/tablet functionality requires testing on your Surface Pro 3.
 
-## Install
-On Mac, upload `main.py`, `README.md`, `requirements.txt`, `.gitignore` into the GitHub repository root. On Pop!_OS:
+## Update via GitHub
+
+Upload `main.py`, `README.md`, `requirements.txt`, and `.gitignore` to the **root** of your existing repository. On the Surface:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -12,23 +13,32 @@ source .venv/bin/activate
 python main.py
 ```
 
-## Motion-object workflow
-1. Save a backup of your artwork. Create an animation with at least 12 frames (Duplicate or + Blank).
-2. On the first frame, paint an object on its own layer. Select that layer.
-3. Click **Make Motion Object from Layer** in the timeline. The pixels in that layer on the current frame are cleared and stored as independent reusable artwork. This is **not yet undoable**.
-4. Select the motion object. At frame 1, use X/Y/Scale/Angle and **Set Keyframe**.
-5. Move to frame 12, enter a different X value and **Set Keyframe**.
-6. Play. X/Y, scale and rotation values interpolate linearly between keyframes. Preview, onion skins, PNG sequence, and MP4 include the motion object.
-7. Save a `.las` project and reopen it to verify motion object and keyframes are retained.
+No new dependencies.
 
-The X/Y values represent relative offset in document pixels. A source image remains the original full-canvas image with transparency; rotation/scale occur around the canvas center, so small drawings far from the center may move unexpectedly. Place source artwork centrally for predictable rotation.
+## What's new
 
-## Limitations
-- Motion objects are rendered above all raster layers, and have no custom z-order controls yet.
-- `Make Motion Object` clears the currently selected raster layer in the active frame. Save a copy first. Not undoable in this version.
-- Keyframe changes are not undoable. Deleting the last keyframe is disallowed.
-- Frame creation/deletion shifts keyframe indices; deleting a keyed frame removes its key.
-- Motion-object transform editing uses numerical controls, not draggable bounding-box handles. Interactive visual transforms and proper object origin controls are deferred.
-- Limit 20 motion objects and 120 frames; no reusable linked cels for raster drawings yet.
-- `.las` format upgraded to version 3. v0.9 can open older v0.4–v0.8 documents, but older app versions cannot open files saved by v0.9.
-- If you want to test FPS playback with a moving object, make enough frames first; objects only animate across existing frames.
+- A layer now exists across **all frames**. Name, visibility, opacity, ordering, and layer identity remain consistent while changing frames.
+- The **Track behavior** control in the right-hand Layers panel offers:
+  - **Animated:** the same track remains selected, but each frame has its own editable cel. A blank frame receives transparent cels; duplicating a frame copies the cels.
+  - **Static:** the artwork is shared across all frames. Edits to it show everywhere, ideal for backgrounds.
+- `,` previous frame and `.` next frame, in addition to Alt+Left and Alt+Right. Shortcuts should be used while working in the canvas, not while entering numbers.
+- `.las` version 4 supports this model. The loader migrates v0.4 through v0.9 documents by preserving each unique legacy layer ID as a track, using transparent cels where that track was absent. Older saves remain untouched until you save over them.
+
+## Caveats
+
+- **Back up projects** before upgrading. Version 4 files are not readable in older releases.
+- Switching an **animated** layer to **static** replaces all its frame-specific cels with the current frame's artwork, after a confirmation dialog. Save As a different filename first if the drawings matter. Switching a static layer to animated creates independent cels containing the current artwork.
+- Converting layer mode is **not undoable** in this version. Layer operations and stroke undo/redo are supported, but undo history clears when switching frames, as before.
+- The source is still mostly in `main.py`; later refactoring into modules is recommended.
+- Static artwork currently gets repeated in the ZIP archive for compatibility and simplicity. A later release can deduplicate it on disk.
+
+## Suggested acceptance tests
+
+1. Create three blank frames, draw on a layer in frame 1, move to frame 2, verify same named layer exists and is selected but its cel is blank.
+2. Draw unique art in frames 2 and 3, move with comma and period, verify each cel is independent.
+3. Add, rename, hide/show, reorder and delete tracks. Check consistency throughout all frames and undo/redo where supported.
+4. Make a new background layer static. Paint on one frame, verify it appears on all frames, including after adding a blank frame.
+5. Duplicate a frame: animated cels should be copies and static cels should stay shared.
+6. Save/reopen the version 4 `.las` file. Confirm layer modes, art, frame count and motion objects.
+7. Load a v0.9 `.las` animation with differently named layers on different frames; verify no artwork disappears and missing cels are transparent.
+8. Test onion skins, playback, PNG sequence, MP4 export, Wacom drawing and project management.

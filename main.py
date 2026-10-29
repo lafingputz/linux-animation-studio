@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.9: keyframed motion objects."""
+"""Linux Animation Studio v0.10: persistent animation layer tracks."""
 import io
 import math
 import shutil
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
-PROJECT_VERSION = 3
+PROJECT_VERSION = 4
 MAX_STEPS = 50
 MAX_HISTORY_BYTES = 96 * 1024 * 1024
 
@@ -58,6 +58,7 @@ class Layer:
     image: QImage
     visible: bool = True
     opacity: int = 100
+    mode: str = "animated"  # animated cels or one shared static image
 
 
 @dataclass
@@ -454,22 +455,26 @@ class Canvas(QWidget):
             p.end()
         elif typ in ('add', 'remove'):
             insert = (typ == 'add') == forward
-            if insert:
-                self.layers.insert(min(cmd['index'], len(self.layers)), cmd['layer'])
-                self.active_id = cmd['layer'].id
-            else:
-                self.layers = [x for x in self.layers if x.id != cmd['layer'].id]
-                self.active_id = cmd['previous_active'] if self.layer_by_id(cmd['previous_active']) else self.layers[-1].id
+            for frame in self.frames:
+                if insert:
+                    original = cmd['layer']
+                    image = original.image if original.mode == 'static' else (original.image if frame is self.layers else transparent_image(self.width_px, self.height_px))
+                    frame.insert(min(cmd['index'], len(frame)), Layer(original.id, original.name, image, original.visible, original.opacity, original.mode))
+                else:
+                    frame[:] = [x for x in frame if x.id != cmd['layer'].id]
+            self.active_id = cmd['layer'].id if insert else cmd['previous_active']
         elif typ == 'property':
-            layer = self.layer_by_id(cmd['id'])
-            if layer:
-                setattr(layer, cmd['field'], cmd['after'] if forward else cmd['before'])
+            for frame in self.frames:
+                layer = next((x for x in frame if x.id == cmd['id']), None)
+                if layer:
+                    setattr(layer, cmd['field'], cmd['after'] if forward else cmd['before'])
         elif typ == 'move':
-            layer = self.layer_by_id(cmd['id'])
-            if layer:
-                self.layers.remove(layer)
-                self.layers.insert(cmd['after'] if forward else cmd['before'], layer)
-        self.frames[self.frame_index] = self.layers
+            for frame in self.frames:
+                layer = next((x for x in frame if x.id == cmd['id']), None)
+                if layer:
+                    frame.remove(layer)
+                    frame.insert(cmd['after'] if forward else cmd['before'], layer)
+        self.layers = self.frames[self.frame_index]
         self.document_changed.emit()
         self.update()
         self._mark_dirty()
@@ -722,8 +727,44 @@ class Canvas(QWidget):
                 self._finish_interaction(event.position())
         event.accept()
 
-    def _copy_layers(self, layers):
-        return [Layer(x.id, x.name, QImage(x.image), x.visible, x.opacity) for x in layers]
+    def _copy_layers(self, layers, duplicate=True):
+        return [Layer(x.id, x.name,
+                      x.image if x.mode == 'static' else (x.image.copy() if duplicate else transparent_image(self.width_px, self.height_px)),
+                      x.visible, x.opacity, x.mode) for x in layers]
+
+    def set_layer_mode(self, mode):
+        """Switch the active track between shared static art and independent cels."""
+        if mode not in ('static', 'animated') or self.drawing or self.playing:
+            return
+        target = self.active_layer()
+        if target is None or target.mode == mode:
+            return
+        # Static -> animated keeps the visible art in each cel and detaches it.
+        # Animated -> static deliberately chooses the *current* cel for all frames.
+        shared = target.image.copy()
+        for frame in self.frames:
+            layer = next(x for x in frame if x.id == target.id)
+            layer.mode = mode
+            layer.image = shared if mode == 'static' else shared.copy() if frame is self.frames[self.frame_index] else layer.image.copy()
+        self._undo.clear()
+        self._redo.clear()
+        self.history_changed.emit(False, False)
+        self._notify_layers()
+
+    def _synchronize_tracks(self):
+        """All frames have identical layer IDs/order/metadata; static images share identity."""
+        template = self.layers
+        for frame in self.frames:
+            previous = {layer.id: layer for layer in frame}
+            result = []
+            for track in template:
+                old = previous.get(track.id)
+                image = (track.image if track.mode == 'static' else
+                         old.image if old is not None else transparent_image(self.width_px, self.height_px))
+                result.append(Layer(track.id, track.name, image, track.visible, track.opacity, track.mode))
+            frame[:] = result
+        self.layers = self.frames[self.frame_index]
+
 
     def _finish_frame_change(self, mark_dirty=True):
         self.deselect()
@@ -745,7 +786,7 @@ class Canvas(QWidget):
             return
         self.frame_index = index
         self.layers = self.frames[index]
-        self.active_id = self.layers[-1].id
+        self.active_id = self.active_id if self.layer_by_id(self.active_id) else self.layers[-1].id
         self._finish_frame_change(mark_dirty=False)
         self.motion_changed.emit()
 
@@ -753,14 +794,13 @@ class Canvas(QWidget):
         if self.drawing or self.drag_origin is not None or len(self.frames) >= 120:
             return
         if duplicate:
-            layers = self._copy_layers(self.layers)
+            layers = self._copy_layers(self.layers, duplicate=True)
         else:
-            layers = [Layer(x.id, x.name, transparent_image(self.width_px, self.height_px),
-                            x.visible, x.opacity) for x in self.layers]
+            layers = self._copy_layers(self.layers, duplicate=False)
         self.frames.insert(self.frame_index + 1, layers)
         self.frame_index += 1
         self.layers = layers
-        self.active_id = layers[-1].id
+        self.active_id = self.active_id if self.layer_by_id(self.active_id) else layers[-1].id
         # Insert an extra cel in the timeline; keyframe positions shift with it.
         for obj in self.motion_objects:
             obj.keys = {k + 1 if k >= self.frame_index else k: v for k, v in obj.keys.items()}
@@ -779,7 +819,7 @@ class Canvas(QWidget):
         self.motion_changed.emit()
         self.frame_index = min(self.frame_index, len(self.frames) - 1)
         self.layers = self.frames[self.frame_index]
-        self.active_id = self.layers[-1].id
+        self.active_id = self.active_id if self.layer_by_id(self.active_id) else self.layers[-1].id
         self._finish_frame_change()
 
     def frame_thumbnail(self, index):
@@ -854,7 +894,7 @@ class Canvas(QWidget):
                     for layer in layers:
                         filename = f'frames/{index}/{layer.id}.png'
                         records.append(dict(id=layer.id, name=layer.name, visible=layer.visible,
-                                            opacity=layer.opacity, file=filename))
+                                            opacity=layer.opacity, mode=layer.mode, file=filename))
                         archive.writestr(filename, png_bytes(layer.image))
                     manifest['frames'].append(dict(layers=records))
                 for obj in self.motion_objects:
@@ -878,7 +918,7 @@ class Canvas(QWidget):
         with zipfile.ZipFile(path, 'r') as archive:
             info = json.loads(archive.read('manifest.json'))
             version = info.get('version')
-            if info.get('format') != 'linux-animation-studio' or version not in (1, 2, 3):
+            if info.get('format') != 'linux-animation-studio' or version not in (1, 2, 3, 4):
                 raise ValueError('Unsupported .las project format/version')
             width, height = int(info['width']), int(info['height'])
             if not (1 <= width <= 8192 and 1 <= height <= 8192):
@@ -907,8 +947,32 @@ class Canvas(QWidget):
                     if not 0 <= opacity <= 100:
                         raise ValueError('Invalid layer opacity')
                     layers.append(Layer(lid, str(entry['name']), image,
-                                        bool(entry['visible']), opacity))
+                                        bool(entry['visible']), opacity, entry.get('mode', 'animated') if version >= 4 else 'animated'))
                 frames.append(layers)
+            # Older projects can contain independently created layers per frame.
+            # Promote every unique ID to its own persistent track, preserving art.
+            # If IDs match across frames, the matching artwork becomes that track's cel.
+            definitions = []
+            observed = set()
+            for frame in frames:
+                for layer in frame:
+                    if layer.id not in observed:
+                        observed.add(layer.id)
+                        definitions.append(layer)
+            if len(definitions) > 100:
+                raise ValueError('Too many layer tracks after migration (maximum 100)')
+            aligned = []
+            for frame in frames:
+                lookup = {layer.id: layer for layer in frame}
+                aligned.append([Layer(template.id, template.name,
+                    lookup[template.id].image if template.id in lookup else transparent_image(width, height),
+                    template.visible, template.opacity, template.mode) for template in definitions])
+            frames = aligned
+            for track_index, template in enumerate(definitions):
+                if template.mode == 'static':
+                    shared = frames[0][track_index].image
+                    for frame in frames:
+                        frame[track_index].image = shared
             index = int(info.get('active_frame', 0)) if version >= 2 else 0
             if not 0 <= index < len(frames):
                 raise ValueError('Invalid active frame')
@@ -1061,6 +1125,12 @@ class MainWindow(QMainWindow):
             b = QPushButton(label)
             b.clicked.connect(fn)
             right.addWidget(b)
+        right.addWidget(QLabel('Track behavior'))
+        self.layer_mode = QComboBox()
+        self.layer_mode.addItem('Animated (independent cels)', 'animated')
+        self.layer_mode.addItem('Static (same art every frame)', 'static')
+        self.layer_mode.currentIndexChanged.connect(self.change_layer_mode)
+        right.addWidget(self.layer_mode)
         right.addWidget(QLabel('Active layer opacity'))
         self.opacity_input = QSpinBox()
         self.opacity_input.setRange(0, 100)
@@ -1204,6 +1274,8 @@ class MainWindow(QMainWindow):
                         ('Ctrl+A', self.canvas.select_all), ('Ctrl+D', self.canvas.deselect),
                         ('Alt+Left', lambda: self.navigate_frame(-1)),
                         ('Alt+Right', lambda: self.navigate_frame(1)),
+                        (',', lambda: self.navigate_frame(-1)),
+                        ('.', lambda: self.navigate_frame(1)),
                         ('Space', self.toggle_playback)]:
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
@@ -1363,10 +1435,10 @@ class MainWindow(QMainWindow):
 
     def refresh_title(self):
         if not self.project_active:
-            self.setWindowTitle('Linux Animation Studio v0.9 - No project open')
+            self.setWindowTitle('Linux Animation Studio v0.10 - No project open')
             return
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.9 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.10 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
@@ -1382,6 +1454,24 @@ class MainWindow(QMainWindow):
         self.opacity_input.blockSignals(True)
         self.opacity_input.setValue(layer.opacity if layer else 100)
         self.opacity_input.blockSignals(False)
+        self.layer_mode.blockSignals(True)
+        self.layer_mode.setCurrentIndex(1 if layer and layer.mode == 'static' else 0)
+        self.layer_mode.blockSignals(False)
+
+    def change_layer_mode(self, index):
+        if not self.project_active or index < 0:
+            return
+        mode = self.layer_mode.itemData(index)
+        layer = self.canvas.active_layer()
+        if layer and layer.mode == 'animated' and mode == 'static' and len(self.canvas.frames) > 1:
+            answer = QMessageBox.question(self, 'Make static layer?',
+                'Use the current frame artwork on ALL frames? Other cels on this layer will be replaced.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                self.refresh_layers()
+                return
+        self.canvas.set_layer_mode(mode)
 
     def selection_changed(self, current, previous):
         if current is not None:
