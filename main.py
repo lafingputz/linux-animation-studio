@@ -1,5 +1,9 @@
-"""Linux Animation Studio v0.7: onion skins, playback and focus management."""
+"""Linux Animation Studio v0.8: project workflow and animation export."""
 import io
+import math
+import shutil
+import subprocess
+import tempfile
 import json
 import sys
 import uuid
@@ -12,7 +16,7 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcu
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
 )
 
 WIDTH, HEIGHT = 1200, 800
@@ -688,6 +692,45 @@ class Canvas(QWidget):
         return result.scaled(90, 60, Qt.AspectRatioMode.KeepAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
 
+    def render_frame(self, index, background=None):
+        """Render a specific frame without changing the current frame or editor overlays."""
+        image = QImage(self.width_px, self.height_px, IMAGE_FORMAT)
+        image.fill(QColor(background) if background else Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        for layer in self.frames[index]:
+            if layer.visible:
+                painter.setOpacity(layer.opacity / 100.0)
+                painter.drawImage(0, 0, layer.image)
+                painter.setOpacity(1.0)
+        painter.end()
+        return image
+
+    def reset_document(self, width=WIDTH, height=HEIGHT):
+        self.drawing = False
+        self.drag_origin = None
+        self.drag_rect = None
+        self.move_source = None
+        self.move_preview = None
+        self.selection = None
+        self.width_px, self.height_px = width, height
+        self.layers = [Layer(uuid.uuid4().hex, 'Layer 1', transparent_image(width, height))]
+        self.frames = [self.layers]
+        self.active_id = self.layers[0].id
+        self.frame_index = 0
+        self.fps = 12
+        self.onion_enabled = False
+        self.onion_opacity = 35
+        self.loop_playback = True
+        self._undo.clear()
+        self._redo.clear()
+        self.setFixedSize(width, height)
+        self.dirty = False
+        self.history_changed.emit(False, False)
+        self.dirty_changed.emit()
+        self.document_changed.emit()
+        self.frames_changed.emit()
+        self.update()
+
     def save_project(self, path):
         # A frame owns its layer images; each frame has independent editable pixels.
         manifest = dict(format='linux-animation-studio', version=PROJECT_VERSION,
@@ -787,6 +830,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.project_path = None
+        self.project_active = True
         self.resize(1370, 930)
         self.play_timer = QTimer(self)
         self.play_timer.setInterval(15)
@@ -806,10 +850,12 @@ class MainWindow(QMainWindow):
         self.canvas.frames_changed.connect(self.refresh_frames)
         self.canvas.playhead_changed.connect(self.refresh_playhead)
 
+        self.toolbar_buttons = []
         def button(text, callback):
             item = QPushButton(text)
             item.clicked.connect(callback)
             toolbar.addWidget(item)
+            self.toolbar_buttons.append(item)
             return item
 
         button('Color', self.pick_color)
@@ -820,7 +866,9 @@ class MainWindow(QMainWindow):
         self.canvas.history_changed.connect(self.update_history)
         button('Clear Layer', self.canvas.clear)
         button('Deselect', self.canvas.deselect)
+        button('New', self.new_project)
         button('Open .las', self.open_project)
+        button('Close', self.close_project)
         button('Save .las', self.save_project)
         button('Export PNG', self.export_png)
         vertical.addLayout(toolbar)
@@ -881,7 +929,25 @@ class MainWindow(QMainWindow):
         self.opacity_input.editingFinished.connect(self.return_canvas_focus)
         right.addWidget(self.opacity_input)
         content.addLayout(right)
-        vertical.addLayout(content, 1)
+        self.workspace = QWidget()
+        self.workspace.setLayout(content)
+        vertical.addWidget(self.workspace, 1)
+        self.welcome = QWidget()
+        welcome_layout = QVBoxLayout(self.welcome)
+        welcome_layout.addStretch()
+        heading = QLabel('Linux Animation Studio\nNo project open')
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setStyleSheet('font-size: 22px; font-weight: bold;')
+        welcome_layout.addWidget(heading)
+        new_button = QPushButton('New Project')
+        new_button.clicked.connect(self.new_project)
+        welcome_layout.addWidget(new_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        open_button = QPushButton('Open Project')
+        open_button.clicked.connect(self.open_project)
+        welcome_layout.addWidget(open_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        welcome_layout.addStretch()
+        vertical.addWidget(self.welcome, 1)
+        self.welcome.hide()
 
         self.timeline_container = QWidget()
         timeline = QVBoxLayout(self.timeline_container)
@@ -946,9 +1012,24 @@ class MainWindow(QMainWindow):
         self.refresh_layers()
         self.refresh_frames()
         self.refresh_title()
+        filemenu = self.menuBar().addMenu('&File')
+        for title, callback, shortcut in [
+            ('New Project', self.new_project, 'Ctrl+N'),
+            ('Open Project', self.open_project, 'Ctrl+O'),
+            ('Save Project', self.save_project, 'Ctrl+S'),
+            ('Save Project As', self.save_project_as, 'Ctrl+Shift+S'),
+            ('Close Project', self.close_project, 'Ctrl+W'),
+            ('Export...', self.export_animation, 'Ctrl+E'),
+            ('Export Current Frame PNG', self.export_png, None),
+            ('Quit', self.close, 'Ctrl+Q'),
+        ]:
+            action = filemenu.addAction(title)
+            action.triggered.connect(callback)
+            if shortcut:
+                action.setShortcut(QKeySequence(shortcut))
+        self._set_project_active(True)
         for seq, fn in [('Ctrl+Z', self.canvas.undo), ('Ctrl+Shift+Z', self.canvas.redo),
-                        ('Ctrl+Y', self.canvas.redo), ('Ctrl+S', self.save_project),
-                        ('Ctrl+Shift+S', self.save_project_as), ('Ctrl+O', self.open_project),
+                        ('Ctrl+Y', self.canvas.redo),
                         ('[', lambda: self.adjust_brush(-1)),
                         (']', lambda: self.adjust_brush(1)),
                         ('Ctrl+A', self.canvas.select_all), ('Ctrl+D', self.canvas.deselect),
@@ -1071,8 +1152,11 @@ class MainWindow(QMainWindow):
         self.loop_checkbox.blockSignals(False)
 
     def refresh_title(self):
+        if not self.project_active:
+            self.setWindowTitle('Linux Animation Studio v0.8 - No project open')
+            return
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.7 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.8 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
@@ -1117,32 +1201,72 @@ class MainWindow(QMainWindow):
             self.canvas.color = color
             self.set_tool('brush')
 
+    def _set_project_active(self, active):
+        self.project_active = active
+        self.workspace.setVisible(active)
+        self.welcome.setVisible(not active)
+        self.timeline_toggle.setVisible(active)
+        self.timeline_container.setVisible(active)
+        for b in self.toolbar_buttons:
+            if b.text() not in ('New', 'Open .las'):
+                b.setEnabled(active)
+        self.refresh_title()
+
     def _confirm_discard(self):
-        if not self.canvas.dirty:
+        if not self.project_active or not self.canvas.dirty:
             return True
-        result = QMessageBox.question(self, 'Unsaved artwork',
-                                      'Discard unsaved changes?',
-                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                      QMessageBox.StandardButton.No)
-        return result == QMessageBox.StandardButton.Yes
+        answer = QMessageBox.warning(
+            self, 'Unsaved project', 'Save changes before continuing?',
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
+            QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Discard:
+            return True
+        return self.save_project()
+
+    def new_project(self):
+        width, ok = QInputDialog.getInt(self, 'New Project', 'Canvas width (px):',
+                                        WIDTH, 1, 8192)
+        if not ok:
+            return
+        height, ok = QInputDialog.getInt(self, 'New Project', 'Canvas height (px):',
+                                         HEIGHT, 1, 8192)
+        if not ok or not self._confirm_discard():
+            return
+        self.pause_playback()
+        self.canvas.reset_document(width, height)
+        self.project_path = None
+        self._set_project_active(True)
+        self.status.setText('New unsaved project')
+        self.canvas.setFocus()
+
+    def close_project(self):
+        if not self.project_active or not self._confirm_discard():
+            return
+        self.pause_playback()
+        self.canvas.reset_document()
+        self.project_path = None
+        self._set_project_active(False)
+        self.status.setText('No project open')
 
     def open_project(self):
-        self.pause_playback()
-        if not self._confirm_discard():
-            return
         path, _ = QFileDialog.getOpenFileName(self, 'Open editable project',
-                                               str(Path.home()), 'LAS projects (*.las)')
-        if not path:
+                                              str(Path.home()), 'LAS projects (*.las)')
+        if not path or not self._confirm_discard():
             return
+        self.pause_playback()
         try:
             self.canvas.load_project(path)
             self.project_path = path
-            self.refresh_title()
+            self._set_project_active(True)
             self.status.setText(f'Opened: {path}')
         except Exception as exc:
             QMessageBox.critical(self, 'Open failed', str(exc))
 
     def save_project_as(self):
+        if not self.project_active:
+            return False
         path, _ = QFileDialog.getSaveFileName(self, 'Save editable project',
                                                self.project_path or str(Path.home()/'Untitled.las'),
                                                'LAS projects (*.las)')
@@ -1164,9 +1288,13 @@ class MainWindow(QMainWindow):
             return False
 
     def save_project(self):
+        if not self.project_active:
+            return False
         return self._save_to(self.project_path) if self.project_path else self.save_project_as()
 
     def export_png(self):
+        if not self.project_active:
+            return
         path, _ = QFileDialog.getSaveFileName(self, 'Export visible layers as PNG',
                                                str(Path.home()/'drawing.png'), 'PNG files (*.png)')
         if not path:
@@ -1175,6 +1303,116 @@ class MainWindow(QMainWindow):
             path += '.png'
         ok = self.canvas.composite(True).save(path, 'PNG')
         self.status.setText(('Exported: ' if ok else 'Export failed: ') + path)
+
+    def export_animation(self):
+        if not self.project_active:
+            return
+        self.pause_playback()
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Export Animation')
+        form = QFormLayout(dialog)
+        fmt = QComboBox()
+        fmt.addItems(['PNG sequence (transparent)', 'PNG sequence (white background)', 'MP4 (H.264)'])
+        form.addRow('Output:', fmt)
+        fps = QSpinBox()
+        fps.setRange(1, 60)
+        fps.setValue(self.canvas.fps)
+        form.addRow('Export FPS:', fps)
+        quality = QComboBox()
+        quality.addItems(['High', 'Balanced', 'Small file'])
+        form.addRow('MP4 quality:', quality)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        is_mp4 = fmt.currentIndex() == 2
+        if is_mp4 and not shutil.which('ffmpeg'):
+            QMessageBox.warning(self, 'FFmpeg missing',
+                                'Install FFmpeg with: sudo apt install ffmpeg')
+            return
+        if is_mp4:
+            destination, _ = QFileDialog.getSaveFileName(
+                self, 'Export MP4', str(Path.home() / 'animation.mp4'), 'MP4 Video (*.mp4)')
+            if not destination:
+                return
+            if not destination.lower().endswith('.mp4'):
+                destination += '.mp4'
+        else:
+            destination = QFileDialog.getExistingDirectory(self, 'Choose PNG sequence folder',
+                                                            str(Path.home()))
+            if not destination:
+                return
+            destination = str(Path(destination) / 'animation_frames')
+            if Path(destination).exists() and any(Path(destination).iterdir()):
+                if QMessageBox.question(self, 'Overwrite frames?',
+                    'The animation_frames folder is not empty. Replace existing numbered PNGs?',
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                    return
+        output_fps = fps.value()
+        source_fps = self.canvas.fps
+        source_count = len(self.canvas.frames)
+        output_count = max(1, math.ceil(source_count * output_fps / source_fps))
+        progress = QProgressDialog('Rendering frames...', 'Cancel', 0, output_count, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        try:
+            with tempfile.TemporaryDirectory(prefix='las-export-') as temp:
+                folder = Path(temp) if is_mp4 else Path(destination)
+                folder.mkdir(parents=True, exist_ok=True)
+                for i in range(output_count):
+                    QApplication.processEvents()
+                    if progress.wasCanceled():
+                        self.status.setText('Export canceled')
+                        return
+                    source_index = min(source_count - 1, i * source_fps // output_fps)
+                    bg = 'white' if is_mp4 or fmt.currentIndex() == 1 else None
+                    frame = self.canvas.render_frame(source_index, bg)
+                    if is_mp4 and (frame.width() % 2 or frame.height() % 2):
+                        padded = QImage(frame.width() + frame.width() % 2,
+                                        frame.height() + frame.height() % 2, IMAGE_FORMAT)
+                        padded.fill(Qt.GlobalColor.white)
+                        painter = QPainter(padded)
+                        painter.drawImage(0, 0, frame)
+                        painter.end()
+                        frame = padded
+                    name = folder / f'frame_{i+1:06d}.png'
+                    if not frame.save(str(name), 'PNG'):
+                        raise OSError(f'Could not write {name}')
+                    progress.setValue(i + 1)
+                if is_mp4:
+                    progress.setLabelText('Encoding MP4 with FFmpeg...')
+                    progress.setRange(0, 0)
+                    crf = [18, 23, 28][quality.currentIndex()]
+                    command = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                               '-framerate', str(output_fps), '-i', str(folder / 'frame_%06d.png'),
+                               '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(crf),
+                               '-movflags', '+faststart', destination]
+                    process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.PIPE)
+                    while process.poll() is None:
+                        QApplication.processEvents()
+                        if progress.wasCanceled():
+                            process.kill()
+                            process.communicate()
+                            Path(destination).unlink(missing_ok=True)
+                            self.status.setText('MP4 export canceled')
+                            return
+                        import time
+                        time.sleep(0.03)
+                    error = process.communicate()[1].decode('utf-8', 'replace')
+                    if process.returncode:
+                        Path(destination).unlink(missing_ok=True)
+                        raise RuntimeError(error[-2500:] or 'FFmpeg encoding failed')
+            self.status.setText(f'Exported: {destination}')
+            QMessageBox.information(self, 'Export complete', f'Saved to:\n{destination}')
+        except Exception as exc:
+            QMessageBox.critical(self, 'Animation export failed', str(exc))
+        finally:
+            progress.close()
 
     def closeEvent(self, event):
         self.pause_playback()

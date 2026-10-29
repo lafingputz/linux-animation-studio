@@ -1,28 +1,47 @@
-# Linux Animation Studio v0.7
+# Linux Animation Studio v0.8
 
-Pressure-sensitive drawing with editable layers, frame timeline, onion skinning and playback.
+Drawing, layers, selections, Wacom pressure, frame timeline, onion skins, playback, and **animation export**. Built from v0.7.
 
-## Install/update
+## Update via GitHub
 
-Upload `main.py`, `requirements.txt`, `README.md` and `.gitignore` to the repository root on GitHub. Then on Pop!_OS:
+On your Mac, upload `main.py`, `requirements.txt`, `README.md`, and `.gitignore` to the repository root. Do **not** upload `__pycache__` or `.venv`.
+
+On Pop!_OS:
 
 ```bash
 cd ~/Projects/linux-animation-studio
 git pull --ff-only
 source .venv/bin/activate
+sudo apt update && sudo apt install -y ffmpeg
 python main.py
 ```
 
-## New controls
+The `ffmpeg` package is required only for MP4 export. All other Python requirements are unchanged.
 
-- **Onion skins:** check the box to view one preceding frame in red and one following frame in green. Adjust Ghost opacity 0–100%. Ghosts are overlay-only and never exported.
-- **Playback:** Play/Pause button or Space (when the canvas owns focus); Stop returns to Frame 1. Check Loop to repeat the sequence. Playback FPS comes from the existing FPS input.
-- **Frame navigation:** Alt+Left and Alt+Right.
-- **Numeric field focus:** Enter commits values and returns focus to the canvas. Clicking/pressing the canvas (including pen press) restores shortcut focus. `[` / `]` still change brush diameter by 1 px.
+## File menu / project lifecycle
 
-## Notes
+- **Ctrl+N** New Project: choose canvas width and height.
+- **Ctrl+O** Open existing `.las` project (supports v0.4–v0.7 files).
+- **Ctrl+S** Save the editable project.
+- **Ctrl+Shift+S** Save As.
+- **Ctrl+W** Close Project: leaves the application open with a welcome screen.
+- **Ctrl+Q** Quit.
+- **Ctrl+E** Export Animation.
+- Unsaved edits trigger **Save / Discard / Cancel** before closing, opening another project, or quitting. Canceling a Save As dialog keeps the current artwork open.
 
-- Playback does not change the artwork or mark an otherwise saved project dirty. FPS, onion settings, and loop preference are stored in the v2 `.las` manifest, with defaults when loading older projects.
-- v0.6 limitations remain: each frame owns a complete set of raster layers; switching frames clears undo history. Export PNG exports the currently selected frame only. Video export is planned for v0.8.
-- Keep backups of important `.las` files.
-- Dependencies unchanged (PySide6, Pillow, NumPy, pytest).
+## Animation export
+
+- File > Export opens an export dialog with PNG sequence (transparent or white background) and MP4 (H.264).
+- Choose output FPS (1–60). Duration is preserved approximately by repeating/skipping source frames. A partial final frame may cause rounding by up to one output-frame duration.
+- Export only composited visible layers; onion skins, selection boxes and pointer previews are not included.
+- PNG sequences are written to an `animation_frames` subfolder of your chosen directory. **Back up existing PNG sequences:** existing numbered output files can be overwritten, and pre-existing surplus frames may remain.
+- MP4 exports are H.264/yuv420p with selectable high, balanced, or small-file quality, using a white background for transparency. Odd canvas dimensions are padded by one pixel for encoder compatibility.
+- Export is incremental: only the active rendered frame is held in memory while PNGs are prepared. The window may be less responsive during encoding on older hardware. Export cancellation terminates FFmpeg but partial PNG-sequence files are not automatically removed.
+- Save `.las` before exporting important work; exports do not replace project files.
+
+## Known limitations
+
+- Each animation frame holds an independent set of layers, so large projects can use considerable memory.
+- Undo history clears when changing frames. Adding/removing animation frames cannot be undone yet.
+- Export has no audio. MP4 requires a working system FFmpeg with `libx264` available.
+- This source passed syntax checks, but GUI behavior has not been tested on the Surface Pro 3 yet.
