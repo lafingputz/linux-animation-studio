@@ -1,4 +1,4 @@
-# Linux Animation Studio v0.14 (experimental)
+# Linux Animation Studio v0.14.1 (transform cursor hotfix)
 
 Based on v0.13, adding an on-canvas Transform tool while preserving the existing drawing, animation and export systems.
 
@@ -40,3 +40,7 @@ Keyframe values and raster pixels are stored in the existing `.las` version 4 fo
 - Verify that changing frames automatically cancels an unfinished transform.
 
 **QA limitation:** Syntax checked, but not GUI/Wacom-tested in this environment. Back up important artwork; report any unexpected behavior before replacing the tagged v0.13 stable release.
+
+## v0.14.1 cursor hotfix
+
+The Transform tool now uses the OS arrow instead of an invisible cursor, including when transforming motion objects. Brush/eraser and selection/move cursors are unchanged. This is a UI-only patch; project format and dependencies are unchanged.

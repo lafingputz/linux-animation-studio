@@ -149,7 +149,10 @@ class Canvas(QWidget):
         self.update()
 
     def _enforce_cursor(self):
-        self.setCursor(Qt.CursorShape.BlankCursor)
+        # Transform uses the standard OS arrow; other tools draw canvas overlays.
+        shape = (Qt.CursorShape.ArrowCursor if self.tool == "transform"
+                 else Qt.CursorShape.BlankCursor)
+        self.setCursor(shape)
 
     def enterEvent(self, event):
         self._enforce_cursor()
@@ -419,6 +422,7 @@ class Canvas(QWidget):
                 rect=QRectF(rect), pivot=QPointF(rect.center()),
                 source=layer.image.copy(), offset=QPointF(0, 0), scale=1.0, angle=0.0)
         self.tool = 'transform'
+        self._enforce_cursor()
         self.update()
         return True
 
@@ -1420,7 +1424,7 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.canvas)
         scroll.setWidgetResizable(False)
         scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        scroll.viewport().setCursor(Qt.CursorShape.BlankCursor)
+        scroll.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         content.addWidget(scroll, 1)
 
         right = QVBoxLayout()
