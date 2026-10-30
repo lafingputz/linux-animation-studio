@@ -1,7 +1,8 @@
-"""Linux Animation Studio v0.15: custom image-tip brush library."""
+"""Linux Animation Studio v0.16: custom brush dynamics and preview."""
 import io
 import os
 import math
+import random
 import shutil
 import subprocess
 import tempfile
@@ -14,7 +15,7 @@ from bisect import bisect_left
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -71,6 +72,11 @@ def load_custom_brushes():
                               'spacing': max(0.05, min(4.0, float(meta.get('spacing', .30)))),
                               'size': max(1, min(500, int(meta.get('size', 48)))),
                               'opacity': max(1, min(100, int(meta.get('opacity', 100)))),
+                              'follow_direction': bool(meta.get('follow_direction', False)),
+                              'rotation_jitter': max(0, min(180, int(meta.get('rotation_jitter', 0)))),
+                              'scatter': max(0, min(200, int(meta.get('scatter', 0)))),
+                              'pressure_size': max(0, min(100, int(meta.get('pressure_size', 100)))),
+                              'pressure_opacity': max(0, min(100, int(meta.get('pressure_opacity', 0)))),
                               'tip': tip.convertToFormat(IMAGE_FORMAT)}
         except (ValueError, KeyError, OSError, TypeError):
             continue
@@ -82,7 +88,7 @@ def save_custom_brush(ident, brush):
     tip_path = BRUSH_ROOT / (ident + '.png')
     if not brush['tip'].save(str(tip_path), 'PNG'):
         raise OSError('Unable to save custom brush tip')
-    metadata = {k: brush[k] for k in ('name','mode','spacing','size','opacity')}
+    metadata = {k: brush[k] for k in ('name','mode','spacing','size','opacity', 'follow_direction', 'rotation_jitter', 'scatter', 'pressure_size', 'pressure_opacity')}
     (BRUSH_ROOT / (ident + '.json')).write_text(json.dumps(metadata, indent=2), encoding='utf-8')
 
 
@@ -139,6 +145,7 @@ class Canvas(QWidget):
         self.custom_brushes = load_custom_brushes()
         self.active_custom_brush = None
         self._stamp_distance = 0.0
+        self._stamp_rng = random.Random()
         self._stamp_cache = {}
         self.brush_preset = 'Round'
         self.brush_settings = {name: {'size': size, 'opacity': opacity} for name, size, opacity in [('Round', 12, 100), ('Pencil', 9, 55), ('Ink', 6, 100), ('Airbrush', 32, 22)]}
@@ -663,31 +670,43 @@ class Canvas(QWidget):
             self._stamp_cache[key] = scaled
         return self._stamp_cache[key]
 
-    def _paint_custom_stamp(self, painter, point, width):
+    def _paint_custom_stamp(self, painter, point, width, pressure, direction):
         brush = self.custom_brushes[self.active_custom_brush]
         tip = self._custom_tip(self.active_custom_brush, width)
+        angle = (direction if brush['follow_direction'] else 0.0)
+        angle += self._stamp_rng.uniform(-brush['rotation_jitter'], brush['rotation_jitter'])
+        scatter = width * brush['scatter'] / 100.0
+        offset_x = self._stamp_rng.uniform(-scatter, scatter)
+        offset_y = self._stamp_rng.uniform(-scatter, scatter)
+        opacity_factor = 1.0 - brush['pressure_opacity']/100.0 * (1.0 - pressure)
         painter.save()
-        painter.setOpacity(brush['opacity'] / 100.0)
-        painter.drawImage(QPointF(point.x() - tip.width()/2, point.y() - tip.height()/2), tip)
+        painter.setOpacity(brush['opacity'] / 100.0 * opacity_factor)
+        painter.translate(point.x() + offset_x, point.y() + offset_y)
+        painter.rotate(angle)
+        painter.drawImage(QPointF(-tip.width()/2, -tip.height()/2), tip)
         painter.restore()
 
     def _stroke_custom(self, painter, point, width, pressure, tablet):
         brush = self.custom_brushes[self.active_custom_brush]
-        # Spacing is measured as a fraction of the full brush diameter.
+        # Distances are in canvas pixels and persist across consecutive pen events.
         step = max(1.0, self.size * brush['spacing'])
+        pressure_factor = 1.0 - brush['pressure_size']/100.0 * (1.0 - pressure)
+        diameter = max(1.0, self.size * pressure_factor) if tablet else self.size
         if self.last is None:
-            self._paint_custom_stamp(painter, point, width)
+            self._paint_custom_stamp(painter, point, diameter, pressure, 0.0)
+            self._stamp_distance = 0.0
             return
         dx, dy = point.x() - self.last.x(), point.y() - self.last.y()
         length = math.hypot(dx, dy)
         if length < 0.001:
             return
-        traveled = step - self._stamp_distance
-        while traveled <= length:
-            t = traveled / length
-            self._paint_custom_stamp(painter, QPointF(self.last.x() + dx*t, self.last.y() + dy*t), width)
-            traveled += step
-        self._stamp_distance = max(0.0, step - (traveled - length))
+        direction = math.degrees(math.atan2(dy, dx))
+        distance = step - self._stamp_distance
+        while distance <= length:
+            t = distance / length
+            self._paint_custom_stamp(painter, QPointF(self.last.x() + dx*t, self.last.y() + dy*t), diameter, pressure, direction)
+            distance += step
+        self._stamp_distance = (self._stamp_distance + length) % step
 
     def stroke(self, point, pressure, tablet):
         if not self.drawing:
@@ -712,8 +731,8 @@ class Canvas(QWidget):
             else: painter.drawLine(self.last, point)
         elif self.active_custom_brush in self.custom_brushes:
             # Include the entire stamp footprint in the undo patch.
-            self._include_point(point, self.size + 8)
-            if self.last is not None: self._include_point(self.last, self.size + 8)
+            self._include_point(point, self.size * (1 + self.custom_brushes[self.active_custom_brush]['scatter']/100.0) * 2 + 8)
+            if self.last is not None: self._include_point(self.last, self.size * (1 + self.custom_brushes[self.active_custom_brush]['scatter']/100.0) * 2 + 8)
             self._stroke_custom(painter, point, width, pressure, tablet)
         else:
             preset = self.brush_preset
@@ -1522,6 +1541,25 @@ class MainWindow(QMainWindow):
         self.spacing_input.valueChanged.connect(self.change_custom_spacing)
         left.addWidget(QLabel('Stamp spacing (% of diameter)'))
         left.addWidget(self.spacing_input)
+        left.addWidget(QLabel('Custom brush dynamics'))
+        self.follow_direction = QCheckBox('Rotate along stroke')
+        self.follow_direction.toggled.connect(lambda v: self.change_custom_dynamic('follow_direction', v))
+        left.addWidget(self.follow_direction)
+        self.dynamics_controls = {}
+        for key, title, maximum in [('rotation_jitter','Random rotation (degrees)',180),
+                                    ('scatter','Scatter (% of size)',200),
+                                    ('pressure_size','Pressure affects size (%)',100),
+                                    ('pressure_opacity','Pressure affects opacity (%)',100)]:
+            left.addWidget(QLabel(title))
+            widget = QSpinBox()
+            widget.setRange(0, maximum)
+            widget.valueChanged.connect(lambda value, k=key: self.change_custom_dynamic(k, value))
+            left.addWidget(widget)
+            self.dynamics_controls[key] = widget
+        self.custom_preview = QLabel('Brush preview')
+        self.custom_preview.setMinimumHeight(75)
+        self.custom_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left.addWidget(self.custom_preview)
         delete_custom = QPushButton('Delete Custom Brush')
         delete_custom.clicked.connect(self.delete_custom_brush)
         left.addWidget(delete_custom)
@@ -1954,8 +1992,44 @@ class MainWindow(QMainWindow):
             self.spacing_input.blockSignals(True)
             self.spacing_input.setValue(round(brush['spacing'] * 100))
             self.spacing_input.blockSignals(False)
+            self.follow_direction.blockSignals(True)
+            self.follow_direction.setChecked(brush['follow_direction'])
+            self.follow_direction.blockSignals(False)
+            for key, widget in self.dynamics_controls.items():
+                widget.blockSignals(True)
+                widget.setValue(brush[key])
+                widget.blockSignals(False)
+        self.update_custom_preview()
         self.canvas._stamp_cache.clear()
         self.set_tool('brush')
+
+    def change_custom_dynamic(self, key, value):
+        ident = self.canvas.active_custom_brush
+        if ident in self.canvas.custom_brushes:
+            brush = self.canvas.custom_brushes[ident]
+            brush[key] = value
+            save_custom_brush(ident, brush)
+            self.update_custom_preview()
+
+    def update_custom_preview(self):
+        ident = self.canvas.active_custom_brush
+        if ident not in self.canvas.custom_brushes:
+            self.custom_preview.setText('Select a custom brush to preview')
+            self.custom_preview.setPixmap(QPixmap())
+            return
+        brush = self.canvas.custom_brushes[ident]
+        preview = QImage(200, 70, IMAGE_FORMAT)
+        preview.fill(QColor('#f6f6f6'))
+        painter = QPainter(preview)
+        original_rng = self.canvas._stamp_rng
+        self.canvas._stamp_rng = random.Random(53)
+        try:
+            for i in range(6):
+                self.canvas._paint_custom_stamp(painter, QPointF(23 + i*30, 35), min(38, brush['size']), 0.8, 10.0)
+        finally:
+            self.canvas._stamp_rng = original_rng
+            painter.end()
+        self.custom_preview.setPixmap(QPixmap.fromImage(preview))
 
     def _create_custom_brush(self, image):
         if image.isNull():
@@ -1980,7 +2054,7 @@ class MainWindow(QMainWindow):
         if not ok: return
         ident = uuid.uuid4().hex
         brush = {'name': name.strip(), 'mode': 'tint' if mode.startswith('Use') else 'color',
-                 'spacing': .30, 'size': 48, 'opacity': 100, 'tip': image.convertToFormat(IMAGE_FORMAT)}
+                 'spacing': .30, 'size': 48, 'opacity': 100, 'follow_direction': False, 'rotation_jitter': 0, 'scatter': 0, 'pressure_size': 100, 'pressure_opacity': 0, 'tip': image.convertToFormat(IMAGE_FORMAT)}
         try:
             save_custom_brush(ident, brush)
         except OSError as ex:
@@ -2008,6 +2082,7 @@ class MainWindow(QMainWindow):
             brush = self.canvas.custom_brushes[ident]
             brush['spacing'] = value / 100.0
             save_custom_brush(ident, brush)
+            self.update_custom_preview()
 
     def delete_custom_brush(self):
         ident = self.canvas.active_custom_brush
