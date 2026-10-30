@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.11: onion skin fix, brush presets and imports."""
+"""Linux Animation Studio v0.12: cross-frame history, cursor, zoom and onion fixes."""
 import io
 import math
 import shutil
@@ -104,6 +104,8 @@ class Canvas(QWidget):
         self.brush_preset = 'Round'
         self.brush_settings = {name: {'size': size, 'opacity': opacity} for name, size, opacity in [('Round', 12, 100), ('Pencil', 9, 55), ('Ink', 6, 100), ('Airbrush', 32, 22)]}
         self.eraser = False
+        self.eraser_size = 48
+        self.zoom = 1.0
         self.tool = 'brush'  # brush, eraser, select, move
         self.selection = None  # QRect in document pixels
         self.drag_origin = None
@@ -138,6 +140,11 @@ class Canvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
         self._enforce_cursor()
 
+    def set_zoom(self, zoom):
+        self.zoom = max(0.25, min(8.0, float(zoom)))
+        self.setFixedSize(round(self.width_px * self.zoom), round(self.height_px * self.zoom))
+        self.update()
+
     def _enforce_cursor(self):
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -166,17 +173,16 @@ class Canvas(QWidget):
         self.hover_position = QPointF(pos)
         if pressure is not None:
             self.hover_pressure = max(0.0, min(1.0, pressure))
-        self.update(old.toAlignedRect())
-        self.update(self.cursor_rect().toAlignedRect())
+        self.update()
 
     def refresh_cursor(self):
         self._enforce_cursor()
-        self.update(self.cursor_rect().toAlignedRect())
+        self.update()
 
     def leaveEvent(self, event):
         old = self.cursor_rect()
         self.hover_position = None
-        self.update(old.toAlignedRect())
+        self.update()
         super().leaveEvent(event)
 
     def active_layer(self):
@@ -265,7 +271,7 @@ class Canvas(QWidget):
         source.fill(Qt.GlobalColor.transparent)
         painter = QPainter(source)
         for layer in self.frames[index]:
-            if layer.visible and layer.mode == "animated":
+            if layer.visible and layer.mode == "animated" and not layer.name.startswith("[Reference] "):
                 painter.setOpacity(layer.opacity / 100.0)
                 painter.drawImage(0, 0, layer.image)
         self.draw_motion_objects(painter, index)
@@ -278,7 +284,8 @@ class Canvas(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.fillRect(self.rect(), Qt.GlobalColor.white)
+        p.scale(self.zoom, self.zoom)
+        p.fillRect(QRect(0, 0, self.width_px, self.height_px), Qt.GlobalColor.white)
         for layer in self.layers:
             if layer.visible:
                 p.setOpacity(layer.opacity / 100.0)
@@ -323,21 +330,17 @@ class Canvas(QWidget):
             p.drawRect(outlined.adjusted(1,1,-1,-1))
         if self.hover_position is not None and not self.playing:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            diameter = self.size if self.tool == "eraser" else self.size * (0.15 + 0.85 * self.hover_pressure)
             center = self.hover_position
-            if self.tool == "eraser":
-                r = diameter / 2.0
+            if self.tool in ('brush', 'eraser'):
+                diameter = self.size if self.tool == 'eraser' else self.size * (0.15 + 0.85 * self.hover_pressure)
+                r = max(0.5, diameter / 2.0)
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.setPen(QPen(QColor(255, 255, 255, 220), 2))
+                p.setPen(QPen(QColor(255, 255, 255, 230), 2.0 / self.zoom))
                 p.drawEllipse(center, r, r)
-                p.setPen(QPen(QColor(35, 35, 35, 235), 1))
+                p.setPen(QPen(QColor(24, 24, 24, 235), 1.0 / self.zoom))
                 p.drawEllipse(center, r, r)
-            else:
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(255, 255, 255, 235))
-                p.drawEllipse(center, 2.5, 2.5)
-                p.setBrush(QColor(25, 25, 25, 235))
-                p.drawEllipse(center, 1.3, 1.3)
+                p.setBrush(QColor('#222222'))
+                p.drawEllipse(center, 1.1 / self.zoom, 1.1 / self.zoom)
         p.end()
 
     def _mark_dirty(self):
@@ -385,6 +388,7 @@ class Canvas(QWidget):
         self.input_kind = kind
         self.last = None
         self._stroke_layer_id = layer.id
+        self._stroke_frame = self.frame_index
         self._before_stroke = layer.image.copy()
         self._stroke_bounds = QRectF()
 
@@ -445,7 +449,7 @@ class Canvas(QWidget):
                 else: painter.drawLine(self.last, point)
         painter.end()
         self.last = QPointF(point)
-        self.update(self._stroke_bounds.toAlignedRect())
+        self.update()
 
     def _end_stroke(self):
         if not self.drawing:
@@ -457,7 +461,7 @@ class Canvas(QWidget):
                 before = self._before_stroke.copy(rect)
                 after = layer.image.copy(rect)
                 if before != after:
-                    self._push(dict(type='patch', id=layer.id, rect=rect,
+                    self._push(dict(type='patch', id=layer.id, frame=self._stroke_frame, rect=rect,
                                     before=before, after=after))
         self.drawing = False
         self.input_kind = None
@@ -470,7 +474,10 @@ class Canvas(QWidget):
     def _apply(self, cmd, forward):
         typ = cmd['type']
         if typ == 'patch':
-            layer = self.layer_by_id(cmd['id'])
+            frame = cmd.get('frame', self.frame_index)
+            if not 0 <= frame < len(self.frames):
+                return
+            layer = next((x for x in self.frames[frame] if x.id == cmd['id']), None)
             if layer is None:
                 return
             p = QPainter(layer.image)
@@ -509,6 +516,8 @@ class Canvas(QWidget):
             return
         cmd = self._undo.pop()
         self._apply(cmd, False)
+        if cmd['type'] == 'patch' and cmd.get('frame') is not None:
+            self.change_frame(cmd['frame'])
         self._redo.append(cmd)
         self.history_changed.emit(bool(self._undo), bool(self._redo))
 
@@ -517,6 +526,8 @@ class Canvas(QWidget):
             return
         cmd = self._redo.pop()
         self._apply(cmd, True)
+        if cmd['type'] == 'patch' and cmd.get('frame') is not None:
+            self.change_frame(cmd['frame'])
         self._undo.append(cmd)
         self.history_changed.emit(bool(self._undo), bool(self._redo))
 
@@ -689,7 +700,7 @@ class Canvas(QWidget):
         typ = event.type()
         pressure = float(event.pressure())
         self.setFocus(Qt.FocusReason.MouseFocusReason) if typ == QEvent.Type.TabletPress else None
-        self.show_hover(event.position(), pressure if self.drawing else 1.0)
+        self.show_hover(event.position() / self.zoom, pressure if self.drawing else 1.0)
         device = event.pointingDevice()
         name = device.name() if device else 'Unknown tablet'
         if self.playing:
@@ -699,20 +710,20 @@ class Canvas(QWidget):
             self.ignore_mouse = True
             if self.tool in ("brush", "eraser"):
                 self._begin_stroke('tablet')
-                self.stroke(event.position(), pressure, True)
+                self.stroke(event.position() / self.zoom, pressure, True)
             else:
-                self._start_interaction(event.position())
+                self._start_interaction(event.position() / self.zoom)
         elif typ == QEvent.Type.TabletMove:
             if self.drawing and self.input_kind == 'tablet':
-                self.stroke(event.position(), pressure, True)
+                self.stroke(event.position() / self.zoom, pressure, True)
             elif self.drag_origin is not None:
-                self._update_interaction(event.position())
+                self._update_interaction(event.position() / self.zoom)
         elif typ == QEvent.Type.TabletRelease:
             if self.drawing and self.input_kind == 'tablet':
-                self.stroke(event.position(), pressure, True)
+                self.stroke(event.position() / self.zoom, pressure, True)
                 self._end_stroke()
             if self.drag_origin is not None:
-                self._finish_interaction(event.position())
+                self._finish_interaction(event.position() / self.zoom)
             self.ignore_mouse = False
         self.diagnostic.emit(f'TABLET: {name} | pressure: {pressure:.3f} | tilt: '
                              f'{event.xTilt():.0f}, {event.yTilt():.0f} | {typ.name}')
@@ -723,24 +734,24 @@ class Canvas(QWidget):
         if self.playing:
             event.accept()
             return
-        self.show_hover(event.position(), 1.0)
+        self.show_hover(event.position() / self.zoom, 1.0)
         if not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton:
             if self.tool in ('brush', 'eraser'):
                 self._begin_stroke('mouse')
-                self.stroke(event.position(), 1.0, False)
+                self.stroke(event.position() / self.zoom, 1.0, False)
             else:
-                self._start_interaction(event.position())
+                self._start_interaction(event.position() / self.zoom)
             self.diagnostic.emit('MOUSE input (fixed width; no pressure)')
         event.accept()
 
     def mouseMoveEvent(self, event):
         if not self.ignore_mouse:
-            self.show_hover(event.position(), 1.0)
+            self.show_hover(event.position() / self.zoom, 1.0)
         if (not self.ignore_mouse and self.drawing and self.input_kind == 'mouse'
                 and event.buttons() & Qt.MouseButton.LeftButton):
-            self.stroke(event.position(), 1.0, False)
+            self.stroke(event.position() / self.zoom, 1.0, False)
         elif self.drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self._update_interaction(event.position())
+            self._update_interaction(event.position() / self.zoom)
         event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -748,7 +759,7 @@ class Canvas(QWidget):
             if self.input_kind == 'mouse':
                 self._end_stroke()
             if self.drag_origin is not None:
-                self._finish_interaction(event.position())
+                self._finish_interaction(event.position() / self.zoom)
         event.accept()
 
     def _copy_layers(self, layers, duplicate=True):
@@ -792,9 +803,6 @@ class Canvas(QWidget):
 
     def _finish_frame_change(self, mark_dirty=True):
         self.deselect()
-        self._undo.clear()
-        self._redo.clear()
-        self.history_changed.emit(False, False)
         self.document_changed.emit()
         if mark_dirty:
             self.frames_changed.emit()
@@ -815,6 +823,7 @@ class Canvas(QWidget):
         self.motion_changed.emit()
 
     def add_frame(self, duplicate=False):
+        self._undo.clear(); self._redo.clear(); self.history_changed.emit(False, False)
         if self.drawing or self.drag_origin is not None or len(self.frames) >= 120:
             return
         if duplicate:
@@ -832,6 +841,7 @@ class Canvas(QWidget):
         self._finish_frame_change()
 
     def delete_frame(self):
+        self._undo.clear(); self._redo.clear(); self.history_changed.emit(False, False)
         if self.drawing or self.drag_origin is not None or len(self.frames) <= 1:
             return
         removed = self.frame_index
@@ -894,7 +904,7 @@ class Canvas(QWidget):
         self.loop_playback = True
         self._undo.clear()
         self._redo.clear()
-        self.setFixedSize(width, height)
+        self.setFixedSize(round(width * self.zoom), round(height * self.zoom))
         self.dirty = False
         self.history_changed.emit(False, False)
         self.dirty_changed.emit()
@@ -1044,7 +1054,7 @@ class Canvas(QWidget):
         self.loop_playback = bool(info.get('loop_playback', True))
         self.layers = frames[index]
         self.active_id = active_id
-        self.setFixedSize(width, height)
+        self.setFixedSize(round(width * self.zoom), round(height * self.zoom))
         self._undo.clear()
         self._redo.clear()
         self.history_changed.emit(False, False)
@@ -1087,7 +1097,8 @@ class MainWindow(QMainWindow):
             self.toolbar_buttons.append(item)
             return item
 
-        button('Color', self.pick_color)
+        self.color_button = button('Color', self.pick_color)
+        self.update_color_swatch()
         self.undo_button = button('Undo', self.canvas.undo)
         self.redo_button = button('Redo', self.canvas.redo)
         self.undo_button.setEnabled(False)
@@ -1314,7 +1325,11 @@ class MainWindow(QMainWindow):
                         ('Alt+Right', lambda: self.navigate_frame(1)),
                         (',', lambda: self.navigate_frame(-1)),
                         ('.', lambda: self.navigate_frame(1)),
-                        ('Space', self.toggle_playback)]:
+                        ('Space', self.toggle_playback),
+                        ('Ctrl++', lambda: self.adjust_zoom(1.25)),
+                        ('Ctrl+=', lambda: self.adjust_zoom(1.25)),
+                        ('Ctrl+-', lambda: self.adjust_zoom(0.8)),
+                        ('Ctrl+0', self.fit_zoom)]:
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
@@ -1417,7 +1432,15 @@ class MainWindow(QMainWindow):
         self.canvas.change_frame(0, playback=True)
 
     def set_tool(self, tool):
+        old_tool = self.canvas.tool
+        if old_tool == 'eraser':
+            self.canvas.eraser_size = self.canvas.size
+        elif old_tool == 'brush':
+            self.canvas.brush_settings[self.canvas.brush_preset]['size'] = self.canvas.size
         self.canvas.change_tool(tool)
+        if old_tool != tool and tool in ('brush', 'eraser'):
+            size = self.canvas.eraser_size if tool == 'eraser' else self.canvas.brush_settings[self.canvas.brush_preset]['size']
+            self.size_input.setValue(size)
         for name, button in self.tool_buttons.items():
             button.setChecked(name == self.canvas.tool)
 
@@ -1533,12 +1556,13 @@ class MainWindow(QMainWindow):
         self.canvas.brush_preset = name
         settings = self.canvas.brush_settings[name]
         self.size_input.blockSignals(True)
-        self.size_input.setValue(settings['size'])
+        self.size_input.setValue(self.canvas.eraser_size if self.canvas.tool == 'eraser' else settings['size'])
         self.size_input.blockSignals(False)
         self.brush_opacity.blockSignals(True)
         self.brush_opacity.setValue(settings['opacity'])
         self.brush_opacity.blockSignals(False)
-        self.change_size(settings['size'])
+        if self.canvas.tool != 'eraser':
+            self.change_size(settings['size'])
         self.return_canvas_focus()
 
     def change_brush_opacity(self, opacity):
@@ -1547,14 +1571,34 @@ class MainWindow(QMainWindow):
     def change_size(self, size):
         old = self.canvas.cursor_rect()
         self.canvas.size = size
-        self.canvas.brush_settings[self.canvas.brush_preset]['size'] = size
-        self.canvas.update(old.toAlignedRect())
+        if self.canvas.tool == 'eraser':
+            self.canvas.eraser_size = size
+        else:
+            self.canvas.brush_settings[self.canvas.brush_preset]['size'] = size
+        self.canvas.update()
         self.canvas.refresh_cursor()
+
+    def update_color_swatch(self):
+        color = self.canvas.color
+        ink = '#ffffff' if color.lightness() < 130 else '#111111'
+        self.color_button.setText('Color  ' + color.name().upper())
+        self.color_button.setStyleSheet(f'QPushButton {{ background-color: {color.name()}; color: {ink}; border: 1px solid #888; padding: 5px; }}')
+
+    def adjust_zoom(self, factor):
+        if not self.project_active:
+            return
+        self.canvas.set_zoom(self.canvas.zoom * factor)
+        self.status.setText(f'Canvas zoom: {self.canvas.zoom * 100:.0f}%')
+
+    def fit_zoom(self):
+        if self.project_active:
+            self.canvas.set_zoom(1.0)
 
     def pick_color(self):
         color = QColorDialog.getColor(self.canvas.color, self, 'Choose brush color')
         if color.isValid():
             self.canvas.color = color
+            self.update_color_swatch()
             self.set_tool('brush')
 
     def _set_project_active(self, active):
@@ -1677,7 +1721,7 @@ class MainWindow(QMainWindow):
         painter.end()
         layer = self.canvas.active_layer()
         idx = self.canvas.layers.index(layer) + 1 if layer else len(self.canvas.layers)
-        name = Path(path).stem[:60] or 'Imported image'
+        name = '[Reference] ' + (Path(path).stem[:60] or 'Imported image')
         imported = Layer(uuid.uuid4().hex, name, new_image)
         cmd = dict(type='add', layer=imported, index=idx, previous_active=self.canvas.active_id)
         self.canvas._apply(cmd, True)
