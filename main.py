@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.12: cross-frame history, cursor, zoom and onion fixes."""
+"""Linux Animation Studio v0.13: undoable timeline edits, tool cursors and alpha-correct onion skins."""
 import io
 import math
 import shutil
@@ -271,7 +271,7 @@ class Canvas(QWidget):
         source.fill(Qt.GlobalColor.transparent)
         painter = QPainter(source)
         for layer in self.frames[index]:
-            if layer.visible and layer.mode == "animated" and not layer.name.startswith("[Reference] "):
+            if layer.visible and layer.mode == "animated":
                 painter.setOpacity(layer.opacity / 100.0)
                 painter.drawImage(0, 0, layer.image)
         self.draw_motion_objects(painter, index)
@@ -341,6 +341,28 @@ class Canvas(QWidget):
                 p.drawEllipse(center, r, r)
                 p.setBrush(QColor('#222222'))
                 p.drawEllipse(center, 1.1 / self.zoom, 1.1 / self.zoom)
+            elif self.tool in ('select', 'move'):
+                # View-independent, high contrast cursor glyphs anchored to the pen tip.
+                x, y = center.x(), center.y()
+                r = 12.0 / self.zoom
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                for color, pen_width in ((QColor(255,255,255), 3.0 / self.zoom),
+                                         (QColor(20,20,25), 1.25 / self.zoom)):
+                    p.setPen(QPen(color, pen_width, Qt.PenStyle.SolidLine,
+                                  Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                    if self.tool == 'select':
+                        p.drawLine(QPointF(x-r,y), QPointF(x+r,y))
+                        p.drawLine(QPointF(x,y-r), QPointF(x,y+r))
+                        p.drawEllipse(center, 2.5/self.zoom, 2.5/self.zoom)
+                    else:
+                        p.drawLine(QPointF(x-r,y),QPointF(x+r,y))
+                        p.drawLine(QPointF(x,y-r),QPointF(x,y+r))
+                        a = 4.5/self.zoom
+                        for sign in (-1,1):
+                            p.drawLine(QPointF(x+sign*r,y),QPointF(x+sign*(r-a),y-a))
+                            p.drawLine(QPointF(x+sign*r,y),QPointF(x+sign*(r-a),y+a))
+                            p.drawLine(QPointF(x,y+sign*r),QPointF(x-a,y+sign*(r-a)))
+                            p.drawLine(QPointF(x,y+sign*r),QPointF(x+a,y+sign*(r-a)))
         p.end()
 
     def _mark_dirty(self):
@@ -368,6 +390,8 @@ class Canvas(QWidget):
                 total += cmd['before'].sizeInBytes() + cmd['after'].sizeInBytes()
             elif cmd['type'] in ('add', 'remove'):
                 total += cmd['layer'].image.sizeInBytes()
+            elif cmd['type'] in ('frame_add', 'frame_delete'):
+                total += sum(layer.image.sizeInBytes() for layer in cmd['layers'] if layer.mode != 'static')
         return total
 
     def _trim_history(self):
@@ -505,6 +529,28 @@ class Canvas(QWidget):
                 if layer:
                     frame.remove(layer)
                     frame.insert(cmd['after'] if forward else cmd['before'], layer)
+        elif typ in ('frame_add', 'frame_delete'):
+            # Retain the exact removed/inserted cel objects, including static-layer
+            # sharing. A command stores before/after key maps for every motion object.
+            inserting = (typ == 'frame_add') == forward
+            if inserting:
+                self.frames.insert(cmd['index'], cmd['layers'])
+            else:
+                removed = self.frames.pop(cmd['index'])
+                if removed is not cmd['layers']:
+                    raise RuntimeError('Timeline history is out of sync')
+            target = cmd['after_frame'] if forward else cmd['before_frame']
+            self.frame_index = min(target, len(self.frames) - 1)
+            for obj in self.motion_objects:
+                if obj.id in cmd['keys_before']:
+                    src = cmd['keys_after'] if forward else cmd['keys_before']
+                    obj.keys = dict(src[obj.id])
+            self.active_id = cmd['active_id']
+            self.selection = None
+            self.drag_rect = None
+            self.move_preview = None
+            self.motion_changed.emit()
+            self.playhead_changed.emit(self.frame_index)
         self.layers = self.frames[self.frame_index]
         self.document_changed.emit()
         self.update()
@@ -822,39 +868,37 @@ class Canvas(QWidget):
         self._finish_frame_change(mark_dirty=False)
         self.motion_changed.emit()
 
+    def _motion_key_snapshot(self):
+        return {obj.id: dict(obj.keys) for obj in self.motion_objects}
+
     def add_frame(self, duplicate=False):
-        self._undo.clear(); self._redo.clear(); self.history_changed.emit(False, False)
-        if self.drawing or self.drag_origin is not None or len(self.frames) >= 120:
+        if self.drawing or self.drag_origin is not None or self.playing or len(self.frames) >= 120:
             return
-        if duplicate:
-            layers = self._copy_layers(self.layers, duplicate=True)
-        else:
-            layers = self._copy_layers(self.layers, duplicate=False)
-        self.frames.insert(self.frame_index + 1, layers)
-        self.frame_index += 1
-        self.layers = layers
-        self.active_id = self.active_id if self.layer_by_id(self.active_id) else layers[-1].id
-        # Insert an extra cel in the timeline; keyframe positions shift with it.
-        for obj in self.motion_objects:
-            obj.keys = {k + 1 if k >= self.frame_index else k: v for k, v in obj.keys.items()}
-        self.motion_changed.emit()
-        self._finish_frame_change()
+        before = self._motion_key_snapshot()
+        index = self.frame_index + 1
+        layers = self._copy_layers(self.layers, duplicate=duplicate)
+        after = {oid: {k + 1 if k >= index else k: v for k, v in keys.items()}
+                 for oid, keys in before.items()}
+        cmd = dict(type='frame_add', index=index, layers=layers,
+                   before_frame=self.frame_index, after_frame=index,
+                   active_id=self.active_id, keys_before=before, keys_after=after)
+        self._apply(cmd, True)
+        self._push(cmd)
 
     def delete_frame(self):
-        self._undo.clear(); self._redo.clear(); self.history_changed.emit(False, False)
-        if self.drawing or self.drag_origin is not None or len(self.frames) <= 1:
+        if self.drawing or self.drag_origin is not None or self.playing or len(self.frames) <= 1:
             return
         removed = self.frame_index
-        del self.frames[self.frame_index]
-        for obj in self.motion_objects:
-            obj.keys = {k - 1 if k > removed else k: v for k, v in obj.keys.items() if k != removed}
-            if not obj.keys:
-                obj.keys = {0: (0.0, 0.0, 100.0, 0.0)}
-        self.motion_changed.emit()
-        self.frame_index = min(self.frame_index, len(self.frames) - 1)
-        self.layers = self.frames[self.frame_index]
-        self.active_id = self.active_id if self.layer_by_id(self.active_id) else self.layers[-1].id
-        self._finish_frame_change()
+        before = self._motion_key_snapshot()
+        after = {}
+        for oid, keys in before.items():
+            shifted = {k - 1 if k > removed else k: v for k, v in keys.items() if k != removed}
+            after[oid] = shifted if shifted else {0: (0.0, 0.0, 100.0, 0.0)}
+        cmd = dict(type='frame_delete', index=removed, layers=self.frames[removed],
+                   before_frame=removed, after_frame=min(removed, len(self.frames) - 2),
+                   active_id=self.active_id, keys_before=before, keys_after=after)
+        self._apply(cmd, True)
+        self._push(cmd)
 
     def frame_thumbnail(self, index):
         result = QImage(self.width_px, self.height_px, IMAGE_FORMAT)
@@ -1496,10 +1540,10 @@ class MainWindow(QMainWindow):
 
     def refresh_title(self):
         if not self.project_active:
-            self.setWindowTitle('Linux Animation Studio v0.10 - No project open')
+            self.setWindowTitle('Linux Animation Studio v0.13 - No project open')
             return
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.10 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.13 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)

@@ -1,26 +1,18 @@
-# Linux Animation Studio v0.12 (experimental)
+# Linux Animation Studio v0.13
 
-This update builds on the v0.11 source and retains `.las` v4 compatibility.
+Focused stability update based on **v0.12**. The four repository-root files are `main.py`, `requirements.txt`, `.gitignore`, and this README.
 
-## Updates
+## New in this version
 
-- Toolbar Color button shows the chosen color (hex code and colored background).
-- Brush and eraser previews now show an outlined nominal diameter (with pressure response while painting).
-- Eraser remembers its own diameter independently of individual brush presets.
-- Brush strokes retain frame-specific references in document-wide undo history, so undo/redo can switch to the frame of the affected stroke.
-- Onion-skin compositing continues to preserve alpha. Newly imported image layers are labelled `[Reference]` and omitted from onion-skin ghost renders to avoid full-canvas image ghosts. To onion-skin imported artwork, copy it to an ordinary animated layer instead.
-- Ctrl+Plus / Ctrl+Equals zoom in, Ctrl+Minus zoom out, Ctrl+0 resets zoom to 100%.
+- Frame creation, duplication, and deletion are now included in the existing document undo/redo stack. Deleted frames retain their animation cels and their position, and motion-object keyframe indices are restored when these operations are undone. Undo operates in chronological order: undo strokes made after creating a frame before undoing the frame creation itself. Standard shortcuts remain Ctrl+Z and Ctrl+Shift+Z / Ctrl+Y.
+- Rectangle Select has a crosshair cursor and Move has a four-way arrow cursor. Brush and Eraser retain their size outlines.
+- Imported image layers are no longer automatically excluded from onion skins. The ghost is tinted using `CompositionMode_SourceIn`, retaining the source's alpha silhouette. Static layers remain excluded. **Opaque JPEG backgrounds still produce an opaque rectangular ghost**: use a transparent PNG/WebP, remove the background, or place the source on a static track if a ghost is undesirable.
 
-## Important limitations
+## Installation
 
-- Frame insertion, frame deletion and track-mode conversion still reset the undo stack to avoid stale frame indexes. This is not yet a fully general document transaction history.
-- Zoom starts at 100% and scales the drawing widget; scrollbars handle large zoom levels. Ctrl+0 resets to 100% (it is **not** automatic fit-to-window).
-- On imported-image-heavy older projects, some non-reference layers may still ghost as a full image; use a static layer for reference backgrounds.
-- Back up your `.las` projects before use. GUI, Wayland, and Wacom behavior have not been tested in this execution environment.
+On the Mac: upload these four files to the root of your existing GitHub repository, and commit as `v0.13 - Frame history, tool cursors, alpha-aware onion skins`.
 
-## Install / run
-
-Upload `main.py`, `requirements.txt`, `README.md`, and `.gitignore` to the repository root on GitHub. Then on the Surface:
+On Pop!_OS:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -29,14 +21,20 @@ source .venv/bin/activate
 python main.py
 ```
 
-No new dependencies.
+No new dependencies. `.las` stays project format v4. Back up important projects before testing.
 
-## Suggested tests
+## Tests to run on the Surface
 
-1. Color swatch follows selected color.
-2. Cursor outlines reflect actual brush and eraser diameter at different zoom levels.
-3. Switching Eraser ⇄ Pencil restores two different sizes, including after using `[` and `]`.
-4. Draw on frame 1, then frame 2, navigate to frame 3; Ctrl+Z should return to frame 2 and undo that stroke, and repeat to undo frame 1.
-5. Use imported transparent and opaque images with onion skins on both sides; confirm no unwanted full-canvas tint.
-6. Zoom using Ctrl+Plus, Ctrl+Minus, Ctrl+0 and verify stylus coordinates, selections, and PNG output are unchanged.
-7. Regression-test `.las` saving/reopening, playback, frame navigation, and exports.
+1. Draw on Frame 1, create Frame 2, draw there, and create Frame 3. Undo drawing on Frame 2, then undo the creation of Frame 3, then Frame 2. Redo to recreate them in the correct order.
+2. Duplicate a frame with artwork. Undo duplication and redo it; verify image contents and independent editable cels remain correct.
+3. Delete an interior frame that contains multiple animated layers. Undo, verify the original frame position and artwork, then redo.
+4. Create a motion object with keyframes on both sides of an inserted/deleted frame; verify undo/redo restores keyframe timing.
+5. Hover the Wacom pen with Rectangle Select and Move selected; check the crosshair and four-way cursor. Maximize the window and retest.
+6. Import transparent PNG/WebP art onto an animated layer; place art on two neighboring frames and check tinted onion skins respect transparent pixels. Also test an opaque JPEG and static layers.
+7. Regression-test drawing, pressure, cross-frame undo, playback, MP4/PNG export, save/reopen and legacy `.las` files.
+
+## Known limits
+
+- Motion-object creation and track-mode conversion still clear history. Keyframe edits are not undoable yet.
+- History is memory-capped; very large frame deletions may evict older undo steps.
+- This build has passed Python source compilation, not actual GUI/Wacom testing in the target Pop!_OS environment.
