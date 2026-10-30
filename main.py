@@ -1,5 +1,6 @@
-"""Linux Animation Studio v0.14: interactive raster and motion-object transformations."""
+"""Linux Animation Studio v0.15: custom image-tip brush library."""
 import io
+import os
 import math
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcu
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
 )
 
 WIDTH, HEIGHT = 1200, 800
@@ -49,6 +50,40 @@ def image_from_bytes(data, width, height):
     if img.isNull() or img.width() != width or img.height() != height:
         raise ValueError('Layer image missing or has an unexpected size')
     return img.convertToFormat(IMAGE_FORMAT)
+
+
+BRUSH_ROOT = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local' / 'share'))) / 'linux-animation-studio' / 'brushes'
+
+
+def load_custom_brushes():
+    """Load user-created brushes; ignore incomplete or malformed entries."""
+    brushes = {}
+    if not BRUSH_ROOT.exists():
+        return brushes
+    for info in BRUSH_ROOT.glob('*.json'):
+        try:
+            meta = json.loads(info.read_text(encoding='utf-8'))
+            ident = info.stem
+            tip = QImage(str(BRUSH_ROOT / (ident + '.png')))
+            if tip.isNull() or tip.width() > 512 or tip.height() > 512:
+                continue
+            brushes[ident] = {'name': str(meta['name']), 'mode': meta['mode'] if meta.get('mode') in ('color','tint') else 'color',
+                              'spacing': max(0.05, min(4.0, float(meta.get('spacing', .30)))),
+                              'size': max(1, min(500, int(meta.get('size', 48)))),
+                              'opacity': max(1, min(100, int(meta.get('opacity', 100)))),
+                              'tip': tip.convertToFormat(IMAGE_FORMAT)}
+        except (ValueError, KeyError, OSError, TypeError):
+            continue
+    return brushes
+
+
+def save_custom_brush(ident, brush):
+    BRUSH_ROOT.mkdir(parents=True, exist_ok=True)
+    tip_path = BRUSH_ROOT / (ident + '.png')
+    if not brush['tip'].save(str(tip_path), 'PNG'):
+        raise OSError('Unable to save custom brush tip')
+    metadata = {k: brush[k] for k in ('name','mode','spacing','size','opacity')}
+    (BRUSH_ROOT / (ident + '.json')).write_text(json.dumps(metadata, indent=2), encoding='utf-8')
 
 
 @dataclass
@@ -101,6 +136,10 @@ class Canvas(QWidget):
         self.active_id = self.layers[0].id
         self.color = QColor('#222222')
         self.size = 12
+        self.custom_brushes = load_custom_brushes()
+        self.active_custom_brush = None
+        self._stamp_distance = 0.0
+        self._stamp_cache = {}
         self.brush_preset = 'Round'
         self.brush_settings = {name: {'size': size, 'opacity': opacity} for name, size, opacity in [('Round', 12, 100), ('Pencil', 9, 55), ('Ink', 6, 100), ('Airbrush', 32, 22)]}
         self.eraser = False
@@ -595,11 +634,60 @@ class Canvas(QWidget):
         self._stroke_frame = self.frame_index
         self._before_stroke = layer.image.copy()
         self._stroke_bounds = QRectF()
+        self._stamp_distance = 0.0
 
     def _include_point(self, point, width):
         r = max(2.0, width / 2.0 + 3)
         rect = QRectF(point.x() - r, point.y() - r, 2 * r, 2 * r)
         self._stroke_bounds = self._stroke_bounds.united(rect) if not self._stroke_bounds.isNull() else rect
+
+    def _custom_tip(self, ident, diameter):
+        brush = self.custom_brushes[ident]
+        diameter = max(1, min(500, int(round(diameter))))
+        key = (ident, diameter, brush['mode'], self.color.name(QColor.NameFormat.HexArgb) if brush['mode'] == 'tint' else '')
+        if key not in self._stamp_cache:
+            original = brush['tip']
+            scaled = original.scaled(diameter, diameter, Qt.AspectRatioMode.KeepAspectRatio,
+                                     Qt.TransformationMode.SmoothTransformation)
+            if brush['mode'] == 'tint':
+                tinted = QImage(scaled.size(), IMAGE_FORMAT)
+                tinted.fill(Qt.GlobalColor.transparent)
+                p = QPainter(tinted)
+                p.drawImage(0, 0, scaled)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+                p.fillRect(tinted.rect(), self.color)
+                p.end()
+                scaled = tinted
+            if len(self._stamp_cache) >= 48:
+                self._stamp_cache.clear()
+            self._stamp_cache[key] = scaled
+        return self._stamp_cache[key]
+
+    def _paint_custom_stamp(self, painter, point, width):
+        brush = self.custom_brushes[self.active_custom_brush]
+        tip = self._custom_tip(self.active_custom_brush, width)
+        painter.save()
+        painter.setOpacity(brush['opacity'] / 100.0)
+        painter.drawImage(QPointF(point.x() - tip.width()/2, point.y() - tip.height()/2), tip)
+        painter.restore()
+
+    def _stroke_custom(self, painter, point, width, pressure, tablet):
+        brush = self.custom_brushes[self.active_custom_brush]
+        # Spacing is measured as a fraction of the full brush diameter.
+        step = max(1.0, self.size * brush['spacing'])
+        if self.last is None:
+            self._paint_custom_stamp(painter, point, width)
+            return
+        dx, dy = point.x() - self.last.x(), point.y() - self.last.y()
+        length = math.hypot(dx, dy)
+        if length < 0.001:
+            return
+        traveled = step - self._stamp_distance
+        while traveled <= length:
+            t = traveled / length
+            self._paint_custom_stamp(painter, QPointF(self.last.x() + dx*t, self.last.y() + dy*t), width)
+            traveled += step
+        self._stamp_distance = max(0.0, step - (traveled - length))
 
     def stroke(self, point, pressure, tablet):
         if not self.drawing:
@@ -622,6 +710,11 @@ class Canvas(QWidget):
                                 Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             if self.last is None: painter.drawPoint(point)
             else: painter.drawLine(self.last, point)
+        elif self.active_custom_brush in self.custom_brushes:
+            # Include the entire stamp footprint in the undo patch.
+            self._include_point(point, self.size + 8)
+            if self.last is not None: self._include_point(self.last, self.size + 8)
+            self._stroke_custom(painter, point, width, pressure, tablet)
         else:
             preset = self.brush_preset
             opacity = self.brush_settings[preset]['opacity'] / 100.0
@@ -1409,6 +1502,29 @@ class MainWindow(QMainWindow):
         self.brush_select.addItems(['Round', 'Pencil', 'Ink', 'Airbrush'])
         self.brush_select.currentTextChanged.connect(self.change_brush_preset)
         left.addWidget(self.brush_select)
+        self.custom_picker = QComboBox()
+        self.custom_picker.addItem('Built-in preset', None)
+        for ident, brush in sorted(self.canvas.custom_brushes.items(), key=lambda item: item[1]['name'].lower()):
+            self.custom_picker.addItem(brush['name'], ident)
+        self.custom_picker.currentIndexChanged.connect(self.choose_custom_brush)
+        left.addWidget(QLabel('Custom brush'))
+        left.addWidget(self.custom_picker)
+        create_selected = QPushButton('Brush from Selection')
+        create_selected.clicked.connect(self.make_custom_brush_from_selection)
+        left.addWidget(create_selected)
+        create_layer = QPushButton('Brush from Active Layer')
+        create_layer.clicked.connect(self.make_custom_brush_from_layer)
+        left.addWidget(create_layer)
+        self.spacing_input = QSpinBox()
+        self.spacing_input.setRange(5, 400)
+        self.spacing_input.setSuffix(' %')
+        self.spacing_input.setValue(30)
+        self.spacing_input.valueChanged.connect(self.change_custom_spacing)
+        left.addWidget(QLabel('Stamp spacing (% of diameter)'))
+        left.addWidget(self.spacing_input)
+        delete_custom = QPushButton('Delete Custom Brush')
+        delete_custom.clicked.connect(self.delete_custom_brush)
+        left.addWidget(delete_custom)
         left.addWidget(QLabel('Brush opacity'))
         self.brush_opacity = QSpinBox()
         self.brush_opacity.setRange(1, 100)
@@ -1828,10 +1944,90 @@ class MainWindow(QMainWindow):
         self.undo_button.setEnabled(undo)
         self.redo_button.setEnabled(redo)
 
+    def choose_custom_brush(self, index):
+        ident = self.custom_picker.itemData(index)
+        self.canvas.active_custom_brush = ident if ident in self.canvas.custom_brushes else None
+        if self.canvas.active_custom_brush:
+            brush = self.canvas.custom_brushes[ident]
+            self.size_input.setValue(brush['size'])
+            self.brush_opacity.setValue(brush['opacity'])
+            self.spacing_input.blockSignals(True)
+            self.spacing_input.setValue(round(brush['spacing'] * 100))
+            self.spacing_input.blockSignals(False)
+        self.canvas._stamp_cache.clear()
+        self.set_tool('brush')
+
+    def _create_custom_brush(self, image):
+        if image.isNull():
+            QMessageBox.warning(self, 'Custom brush', 'There are no pixels to use as a brush tip.')
+            return
+        # Crop transparent padding so a thin tip does not become tiny when scaled.
+        bounds = QRect()
+        for y in range(image.height()):
+            for x in range(image.width()):
+                if QColor(image.pixel(x,y)).alpha() > 0:
+                    pt = QRect(x,y,1,1)
+                    bounds = bounds.united(pt) if not bounds.isNull() else pt
+        if bounds.isNull():
+            QMessageBox.warning(self, 'Custom brush', 'The selection is transparent.')
+            return
+        image = image.copy(bounds)
+        if max(image.width(), image.height()) > 512:
+            image = image.scaled(512,512,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation)
+        name, ok = QInputDialog.getText(self, 'Create Brush', 'Brush name:')
+        if not ok or not name.strip(): return
+        mode, ok = QInputDialog.getItem(self, 'Brush appearance', 'Stamp style:', ['Preserve original colors', 'Use selected drawing color'], 0, False)
+        if not ok: return
+        ident = uuid.uuid4().hex
+        brush = {'name': name.strip(), 'mode': 'tint' if mode.startswith('Use') else 'color',
+                 'spacing': .30, 'size': 48, 'opacity': 100, 'tip': image.convertToFormat(IMAGE_FORMAT)}
+        try:
+            save_custom_brush(ident, brush)
+        except OSError as ex:
+            QMessageBox.warning(self, 'Custom brush', str(ex)); return
+        self.canvas.custom_brushes[ident] = brush
+        self.custom_picker.addItem(brush['name'], ident)
+        self.custom_picker.setCurrentIndex(self.custom_picker.count()-1)
+
+    def make_custom_brush_from_selection(self):
+        layer = self.canvas.active_layer()
+        rect = self.canvas.selection
+        if layer is None or rect is None or rect.isEmpty():
+            QMessageBox.information(self, 'Custom brush', 'Choose a drawing layer and make a rectangle selection first.')
+            return
+        self._create_custom_brush(layer.image.copy(rect))
+
+    def make_custom_brush_from_layer(self):
+        layer = self.canvas.active_layer()
+        if layer is None: return
+        self._create_custom_brush(layer.image.copy())
+
+    def change_custom_spacing(self, value):
+        ident = self.canvas.active_custom_brush
+        if ident in self.canvas.custom_brushes:
+            brush = self.canvas.custom_brushes[ident]
+            brush['spacing'] = value / 100.0
+            save_custom_brush(ident, brush)
+
+    def delete_custom_brush(self):
+        ident = self.canvas.active_custom_brush
+        if ident not in self.canvas.custom_brushes: return
+        brush = self.canvas.custom_brushes[ident]
+        response = QMessageBox.question(self, 'Delete Custom Brush', f'Delete preset "{brush["name"]}"? Existing artwork will stay unchanged.')
+        if response != QMessageBox.StandardButton.Yes: return
+        for ext in ('.png','.json'):
+            (BRUSH_ROOT / (ident + ext)).unlink(missing_ok=True)
+        del self.canvas.custom_brushes[ident]
+        self.canvas._stamp_cache.clear()
+        self.custom_picker.removeItem(self.custom_picker.currentIndex())
+        self.custom_picker.setCurrentIndex(0)
+
     def change_brush_preset(self, name):
         if name not in self.canvas.brush_settings:
             return
         self.canvas.brush_preset = name
+        if self.canvas.active_custom_brush is not None:
+            self.custom_picker.setCurrentIndex(0)
         settings = self.canvas.brush_settings[name]
         self.size_input.blockSignals(True)
         self.size_input.setValue(self.canvas.eraser_size if self.canvas.tool == 'eraser' else settings['size'])
@@ -1844,6 +2040,11 @@ class MainWindow(QMainWindow):
         self.return_canvas_focus()
 
     def change_brush_opacity(self, opacity):
+        if self.canvas.active_custom_brush in self.canvas.custom_brushes:
+            brush = self.canvas.custom_brushes[self.canvas.active_custom_brush]
+            brush['opacity'] = opacity
+            save_custom_brush(self.canvas.active_custom_brush, brush)
+            return
         self.canvas.brush_settings[self.canvas.brush_preset]['opacity'] = opacity
 
     def change_size(self, size):
@@ -1853,6 +2054,10 @@ class MainWindow(QMainWindow):
             self.canvas.eraser_size = size
         else:
             self.canvas.brush_settings[self.canvas.brush_preset]['size'] = size
+            if self.canvas.active_custom_brush in self.canvas.custom_brushes:
+                brush = self.canvas.custom_brushes[self.canvas.active_custom_brush]
+                brush['size'] = size
+                save_custom_brush(self.canvas.active_custom_brush, brush)
         self.canvas.update()
         self.canvas.refresh_cursor()
 

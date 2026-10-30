@@ -1,10 +1,30 @@
-# Linux Animation Studio v0.14.1 (transform cursor hotfix)
+# Linux Animation Studio v0.15
 
-Based on v0.13, adding an on-canvas Transform tool while preserving the existing drawing, animation and export systems.
+Native PySide6 drawing and animation prototype for Linux. Based on the tested v0.14.1 source.
 
-## Install
+## Changes
 
-Upload `main.py`, `requirements.txt`, `.gitignore` and `README.md` to your existing GitHub repository. On Pop!_OS:
+- **Brush from Selection**: choose an active raster layer, create a rectangular selection around visible pixels, then click `Brush from Selection`.
+- **Brush from Active Layer**: create a brush tip from visible pixels of the selected active layer (including a layer imported with Ctrl+I). Transparent padding is trimmed.
+- Give the new brush a name, then choose **Preserve original colors** (colored stamp) or **Use selected drawing color** (tintable alpha-mask stamp).
+- The **Custom brush** dropdown switches between saved presets. The built-in brush dropdown is still available.
+- **Stamp spacing** is a percent of the nominal brush diameter. Lower values create denser strokes; higher values create separated stamps.
+- Use the normal Brush size and Brush opacity fields for a custom brush. Tablet pressure scales stamp size.
+- **Delete Custom Brush** removes the saved brush preset, never pixels painted with it.
+
+## Storage
+
+Custom brush definitions live outside `.las` documents at:
+
+`~/.local/share/linux-animation-studio/brushes/`
+
+(or `$XDG_DATA_HOME/linux-animation-studio/brushes/` if that variable is set).
+
+Each saved brush is a UUID-named `.png` for its tip and a matching `.json` for its properties. Keep this directory when migrating to another machine. The `.las` format remains version 4; artwork made using custom brushes is stored as normal raster pixels and does not require the brush preset to remain installed.
+
+## Install / update
+
+Upload `main.py`, `README.md`, `requirements.txt`, and `.gitignore` to the **root** of your existing GitHub repository. On Pop!_OS:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -13,34 +33,27 @@ source .venv/bin/activate
 python main.py
 ```
 
-## Raster transform
+No new dependencies beyond PySide6. The original FFmpeg package is still used for video export.
 
-1. Save a backup of your `.las` project first.
-2. Select a raster layer; optionally make a rectangular selection.
-3. Choose **Transform** on the left toolbar.
-4. Drag inside the transform box to move; drag a corner to scale proportionally; drag the circular handle beyond the top edge to rotate. The center marker moves the transform pivot.
-5. Click **Apply Transform** or press Enter while the canvas has focus. Click **Cancel Transform** or press Esc to abandon the preview.
-6. Ctrl+Z / Ctrl+Shift+Z undo/redo the finished raster transform.
+## Test checklist
 
-The first version uses **uniform scaling** on all corners, and the canvas-aligned source rectangle is the full layer unless you select a region. Edges outside the canvas are clipped. Each transform is applied to the original pixels only once, on confirmation. Undo stores a full-canvas patch for transforms, which may be memory-intensive for large canvases. Transformation of static layers updates their shared artwork.
+1. Draw on a raster layer, rectangle-select an area, click Brush from Selection, and use the new preset.
+2. Import a transparent PNG with Ctrl+I, select its raster layer, and create a brush from the layer.
+3. Paint with a color-preserving stamp; ensure the source colors survive.
+4. Create a tintable stamp; change the selected color and verify the new strokes adopt it.
+5. Change custom-brush diameter, opacity, and spacing. Test continuous and widely spaced stamps.
+6. Test Wacom pressure response and cursor size.
+7. Close/reopen the program and verify the saved preset remains in the custom brush dropdown.
+8. Delete a custom brush and confirm previously painted artwork remains intact.
+9. Draw custom brush strokes on different frames and test cross-frame undo/redo.
+10. Save/reopen a `.las` project, then render PNG/MP4 and verify custom-brush artwork appears.
+11. Regression-check v0.14.1 raster/motion transforms, frame history, onion skins, and project management.
 
-## Motion object transform
+## Limitations
 
-Select a motion object from the timeline dropdown, then click **Transform Motion Object** on the left. Drag to move, a corner to change scale, or the rotation handle. Apply writes an undoable keyframe at the current frame; Cancel discards the preview. The motion object's transform retains the existing canvas-center pivot: the center handle is a visual-only adjustment during this prototype, and its position is not persisted. For precise values, use the existing X/Y/Scale/Angle fields.
-
-Keyframe values and raster pixels are stored in the existing `.las` version 4 format. v0.13 and older project files continue to be readable. This version does not add new dependencies.
-
-## Test on your Surface Pro 3
-
-- Wacom hover and pressure still draw normally in Brush mode.
-- Select a small area, transform it, cancel, retry and commit; inspect untouched areas.
-- Undo/redo a raster transform, including after switching frames.
-- Transform a motion object at frame 1 and frame 12, check playback and MP4 export.
-- Save and reopen `.las`, including an older project.
-- Verify that changing frames automatically cancels an unfinished transform.
-
-**QA limitation:** Syntax checked, but not GUI/Wacom-tested in this environment. Back up important artwork; report any unexpected behavior before replacing the tagged v0.13 stable release.
-
-## v0.14.1 cursor hotfix
-
-The Transform tool now uses the OS arrow instead of an invisible cursor, including when transforming motion objects. Brush/eraser and selection/move cursors are unchanged. This is a UI-only patch; project format and dependencies are unchanged.
+- Brush tip creation captures **the currently selected raster layer only**, not a composite of all visible layers. Use a temporary merged layer if needed.
+- Brush tips are downscaled to a maximum of 512 pixels in either dimension for responsiveness on the Surface Pro 3.
+- Stamps maintain their source orientation. Rotation, randomness, scattering and other advanced dynamics are planned for later releases.
+- Spacing is in percent of the maximum configured brush diameter; pressure changes stamp size but not inter-stamp spacing.
+- Raster strokes made with a custom brush are editable and undoable as raster content, not as separate procedural objects.
+- This build was syntax-checked but not GUI-/tablet-tested in this environment. Please keep a v0.14.1 tag and back up important `.las` projects before upgrading.
