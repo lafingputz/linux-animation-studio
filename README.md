@@ -1,18 +1,10 @@
-# Linux Animation Studio v0.13
+# Linux Animation Studio v0.14 (experimental)
 
-Focused stability update based on **v0.12**. The four repository-root files are `main.py`, `requirements.txt`, `.gitignore`, and this README.
+Based on v0.13, adding an on-canvas Transform tool while preserving the existing drawing, animation and export systems.
 
-## New in this version
+## Install
 
-- Frame creation, duplication, and deletion are now included in the existing document undo/redo stack. Deleted frames retain their animation cels and their position, and motion-object keyframe indices are restored when these operations are undone. Undo operates in chronological order: undo strokes made after creating a frame before undoing the frame creation itself. Standard shortcuts remain Ctrl+Z and Ctrl+Shift+Z / Ctrl+Y.
-- Rectangle Select has a crosshair cursor and Move has a four-way arrow cursor. Brush and Eraser retain their size outlines.
-- Imported image layers are no longer automatically excluded from onion skins. The ghost is tinted using `CompositionMode_SourceIn`, retaining the source's alpha silhouette. Static layers remain excluded. **Opaque JPEG backgrounds still produce an opaque rectangular ghost**: use a transparent PNG/WebP, remove the background, or place the source on a static track if a ghost is undesirable.
-
-## Installation
-
-On the Mac: upload these four files to the root of your existing GitHub repository, and commit as `v0.13 - Frame history, tool cursors, alpha-aware onion skins`.
-
-On Pop!_OS:
+Upload `main.py`, `requirements.txt`, `.gitignore` and `README.md` to your existing GitHub repository. On Pop!_OS:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -21,20 +13,30 @@ source .venv/bin/activate
 python main.py
 ```
 
-No new dependencies. `.las` stays project format v4. Back up important projects before testing.
+## Raster transform
 
-## Tests to run on the Surface
+1. Save a backup of your `.las` project first.
+2. Select a raster layer; optionally make a rectangular selection.
+3. Choose **Transform** on the left toolbar.
+4. Drag inside the transform box to move; drag a corner to scale proportionally; drag the circular handle beyond the top edge to rotate. The center marker moves the transform pivot.
+5. Click **Apply Transform** or press Enter while the canvas has focus. Click **Cancel Transform** or press Esc to abandon the preview.
+6. Ctrl+Z / Ctrl+Shift+Z undo/redo the finished raster transform.
 
-1. Draw on Frame 1, create Frame 2, draw there, and create Frame 3. Undo drawing on Frame 2, then undo the creation of Frame 3, then Frame 2. Redo to recreate them in the correct order.
-2. Duplicate a frame with artwork. Undo duplication and redo it; verify image contents and independent editable cels remain correct.
-3. Delete an interior frame that contains multiple animated layers. Undo, verify the original frame position and artwork, then redo.
-4. Create a motion object with keyframes on both sides of an inserted/deleted frame; verify undo/redo restores keyframe timing.
-5. Hover the Wacom pen with Rectangle Select and Move selected; check the crosshair and four-way cursor. Maximize the window and retest.
-6. Import transparent PNG/WebP art onto an animated layer; place art on two neighboring frames and check tinted onion skins respect transparent pixels. Also test an opaque JPEG and static layers.
-7. Regression-test drawing, pressure, cross-frame undo, playback, MP4/PNG export, save/reopen and legacy `.las` files.
+The first version uses **uniform scaling** on all corners, and the canvas-aligned source rectangle is the full layer unless you select a region. Edges outside the canvas are clipped. Each transform is applied to the original pixels only once, on confirmation. Undo stores a full-canvas patch for transforms, which may be memory-intensive for large canvases. Transformation of static layers updates their shared artwork.
 
-## Known limits
+## Motion object transform
 
-- Motion-object creation and track-mode conversion still clear history. Keyframe edits are not undoable yet.
-- History is memory-capped; very large frame deletions may evict older undo steps.
-- This build has passed Python source compilation, not actual GUI/Wacom testing in the target Pop!_OS environment.
+Select a motion object from the timeline dropdown, then click **Transform Motion Object** on the left. Drag to move, a corner to change scale, or the rotation handle. Apply writes an undoable keyframe at the current frame; Cancel discards the preview. The motion object's transform retains the existing canvas-center pivot: the center handle is a visual-only adjustment during this prototype, and its position is not persisted. For precise values, use the existing X/Y/Scale/Angle fields.
+
+Keyframe values and raster pixels are stored in the existing `.las` version 4 format. v0.13 and older project files continue to be readable. This version does not add new dependencies.
+
+## Test on your Surface Pro 3
+
+- Wacom hover and pressure still draw normally in Brush mode.
+- Select a small area, transform it, cancel, retry and commit; inspect untouched areas.
+- Undo/redo a raster transform, including after switching frames.
+- Transform a motion object at frame 1 and frame 12, check playback and MP4 export.
+- Save and reopen `.las`, including an older project.
+- Verify that changing frames automatically cancels an unfinished transform.
+
+**QA limitation:** Syntax checked, but not GUI/Wacom-tested in this environment. Back up important artwork; report any unexpected behavior before replacing the tagged v0.13 stable release.

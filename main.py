@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.13: undoable timeline edits, tool cursors and alpha-correct onion skins."""
+"""Linux Animation Studio v0.14: interactive raster and motion-object transformations."""
 import io
 import math
 import shutil
@@ -13,7 +13,7 @@ from bisect import bisect_left
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -114,6 +114,9 @@ class Canvas(QWidget):
         self.move_preview = None
         self.move_offset = QPoint(0, 0)
         self.move_layer_id = None
+        self.transform_session = None
+        self.transform_drag = None
+        self.transform_motion_mode = False
         self.drawing = False
         self.input_kind = None
         self.last = None
@@ -198,6 +201,10 @@ class Canvas(QWidget):
         # The source is immutable; transforms happen only while compositing.
         for obj in self.motion_objects:
             dx, dy, percent, degrees = interpolated_transform(obj.keys, index)
+            session = self.transform_session
+            if (session and session['kind'] == 'motion' and session['id'] == obj.id
+                    and index == self.frame_index):
+                dx, dy, percent, degrees = session['values']
             painter.save()
             cx, cy = self.width_px / 2.0, self.height_px / 2.0
             painter.translate(cx + dx, cy + dy)
@@ -235,20 +242,22 @@ class Canvas(QWidget):
             raise ValueError('Create or select a motion object first')
         if self.playing:
             raise ValueError('Pause playback before editing keyframes')
-        obj.keys[self.frame_index] = (float(x), float(y), float(scale), float(angle))
-        self._mark_dirty()
-        self.motion_changed.emit()
-        self.frames_changed.emit()
-        self.update()
+        before = obj.keys.get(self.frame_index)
+        after = (float(x), float(y), float(scale), float(angle))
+        if before == after:
+            return
+        cmd = dict(type='motion_key', id=obj.id, frame=self.frame_index,
+                   before=before, after=after)
+        self._apply(cmd, True)
+        self._push(cmd)
 
     def delete_motion_key(self):
         obj = self.active_motion()
         if obj is not None and self.frame_index in obj.keys and len(obj.keys) > 1:
-            del obj.keys[self.frame_index]
-            self._mark_dirty()
-            self.motion_changed.emit()
-            self.frames_changed.emit()
-            self.update()
+            cmd = dict(type='motion_key', id=obj.id, frame=self.frame_index,
+                       before=obj.keys[self.frame_index], after=None)
+            self._apply(cmd, True)
+            self._push(cmd)
 
     def composite(self, white_background=False):
         image = QImage(self.width_px, self.height_px, IMAGE_FORMAT)
@@ -292,6 +301,23 @@ class Canvas(QWidget):
                 p.drawImage(0, 0, layer.image)
                 p.setOpacity(1.0)
         self.draw_motion_objects(p, self.frame_index)
+        session = self.transform_session
+        if session and session['kind'] == 'raster':
+            # Rebuild the flattened preview using a temporary copy. Source artwork
+            # remains untouched until Apply; each move reuses the original snapshot.
+            layer = self.layer_by_id(session['id'])
+            if layer is not None:
+                preview_layer = self._transformed_layer_image(session)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                p.setOpacity(1.0)
+                p.fillRect(QRect(0, 0, self.width_px, self.height_px), Qt.GlobalColor.white)
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                for drawn_layer in self.layers:
+                    if drawn_layer.visible:
+                        p.setOpacity(drawn_layer.opacity / 100.0)
+                        p.drawImage(0, 0, preview_layer if drawn_layer.id == layer.id else drawn_layer.image)
+                p.setOpacity(1.0)
+                self.draw_motion_objects(p, self.frame_index)
         if self.move_preview is not None and self.move_layer_id is not None:
             layer = self.layer_by_id(self.move_layer_id)
             if layer is not None:
@@ -328,6 +354,8 @@ class Canvas(QWidget):
             p.drawRect(outlined)
             p.setPen(QPen(QColor(10,10,10), 1, Qt.PenStyle.DotLine))
             p.drawRect(outlined.adjusted(1,1,-1,-1))
+        if session and not self.playing:
+            self._paint_transform_handles(p, session)
         if self.hover_position is not None and not self.playing:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             center = self.hover_position
@@ -364,6 +392,154 @@ class Canvas(QWidget):
                             p.drawLine(QPointF(x,y+sign*r),QPointF(x-a,y+sign*(r-a)))
                             p.drawLine(QPointF(x,y+sign*r),QPointF(x+a,y+sign*(r-a)))
         p.end()
+
+    def begin_transform(self, motion=False):
+        """Start a cancellable, non-destructive manipulation session."""
+        if self.playing or self.drawing:
+            return False
+        self.cancel_transform()
+        if motion:
+            obj = self.active_motion()
+            if obj is None:
+                self.diagnostic.emit('Select a motion object in the timeline first.')
+                return False
+            self.transform_session = dict(kind='motion', id=obj.id,
+                rect=QRectF(0, 0, self.width_px, self.height_px),
+                pivot=QPointF(self.width_px/2, self.height_px/2),
+                values=list(interpolated_transform(obj.keys, self.frame_index)),
+                original=obj.keys.get(self.frame_index))
+        else:
+            layer = self.active_layer()
+            if layer is None or not layer.visible:
+                return False
+            rect = self.selection if self.selection else layer.image.rect()
+            if rect.isEmpty():
+                return False
+            self.transform_session = dict(kind='raster', id=layer.id, frame=self.frame_index,
+                rect=QRectF(rect), pivot=QPointF(rect.center()),
+                source=layer.image.copy(), offset=QPointF(0, 0), scale=1.0, angle=0.0)
+        self.tool = 'transform'
+        self.update()
+        return True
+
+    def cancel_transform(self):
+        self.transform_drag = None
+        self.transform_session = None
+        self.update()
+
+    def _transform_matrix(self, session):
+        pivot = session['pivot']
+        matrix = QTransform()
+        matrix.translate(pivot.x(), pivot.y())
+        matrix.translate(session['offset'].x(), session['offset'].y())
+        matrix.rotate(session['angle'])
+        matrix.scale(session['scale'], session['scale'])
+        matrix.translate(-pivot.x(), -pivot.y())
+        return matrix
+
+    def _transformed_layer_image(self, session):
+        image = session['source'].copy()
+        rect = session['rect'].toAlignedRect()
+        crop = session['source'].copy(rect)
+        painter = QPainter(image)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(rect, Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setTransform(self._transform_matrix(session))
+        painter.drawImage(rect.topLeft(), crop)
+        painter.end()
+        return image
+
+    def _transform_handles(self, session):
+        if session['kind'] == 'raster':
+            mat = self._transform_matrix(session)
+            rect = session['rect']
+            corners = [mat.map(pt) for pt in (rect.topLeft(),rect.topRight(),rect.bottomRight(),rect.bottomLeft())]
+            pivot = mat.map(session['pivot'])
+        else:
+            x,y,scale,angle = session['values']
+            rect = session['rect']
+            pivot = QPointF(session['pivot'].x()+x, session['pivot'].y()+y)
+            mat=QTransform()
+            mat.translate(pivot.x(),pivot.y())
+            mat.rotate(angle)
+            mat.scale(scale/100,scale/100)
+            mat.translate(-session['pivot'].x(),-session['pivot'].y())
+            corners=[mat.map(pt) for pt in (rect.topLeft(),rect.topRight(),rect.bottomRight(),rect.bottomLeft())]
+        top=QPointF((corners[0].x()+corners[1].x())/2,(corners[0].y()+corners[1].y())/2)
+        vx=top.x()-pivot.x();vy=top.y()-pivot.y()
+        length=max(1.0,math.hypot(vx,vy))
+        rot=QPointF(top.x()+vx/length*28/self.zoom,top.y()+vy/length*28/self.zoom)
+        return corners,pivot,rot
+
+    def _paint_transform_handles(self,painter,session):
+        corners,pivot,rot=self._transform_handles(session)
+        painter.setOpacity(1.0)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor('#7356be'),1.7/self.zoom,Qt.PenStyle.DashLine))
+        for i in range(4): painter.drawLine(corners[i],corners[(i+1)%4])
+        painter.setPen(QPen(QColor('#3b285e'),1.3/self.zoom))
+        painter.setBrush(QColor('white'))
+        radius=5/self.zoom
+        for pt in corners: painter.drawRect(QRectF(pt.x()-radius,pt.y()-radius,2*radius,2*radius))
+        painter.drawEllipse(rot,radius,radius)
+        painter.setBrush(QColor('#eeab36'))
+        painter.drawEllipse(pivot,4/self.zoom,4/self.zoom)
+
+    def _transform_press(self,point):
+        session=self.transform_session
+        if not session:return
+        corners,pivot,rot=self._transform_handles(session)
+        threshold=13/self.zoom
+        mode='move'
+        if math.hypot(point.x()-rot.x(),point.y()-rot.y())<threshold: mode='rotate'
+        elif math.hypot(point.x()-pivot.x(),point.y()-pivot.y())<threshold: mode='pivot'
+        elif min(math.hypot(point.x()-c.x(),point.y()-c.y()) for c in corners)<threshold: mode='scale'
+        self.transform_drag=dict(mode=mode,start=QPointF(point),pivot=QPointF(pivot),
+            scale=session.get('scale'),angle=session.get('angle'),offset=QPointF(session.get('offset',QPointF())),
+            values=list(session.get('values',[])),point_distance=max(1,math.hypot(point.x()-pivot.x(),point.y()-pivot.y())),
+            point_angle=math.degrees(math.atan2(point.y()-pivot.y(),point.x()-pivot.x())))
+
+    def _transform_move(self,point):
+        session=self.transform_session;drag=self.transform_drag
+        if not session or not drag:return
+        dx=point.x()-drag['start'].x();dy=point.y()-drag['start'].y()
+        mode=drag['mode']
+        if session['kind']=='raster':
+            if mode=='move':session['offset']=drag['offset']+QPointF(dx,dy)
+            elif mode=='pivot':
+                session['pivot']+=QPointF(dx,dy);drag['start']=QPointF(point)
+            elif mode=='scale':session['scale']=max(.01,min(20,drag['scale']*math.hypot(point.x()-drag['pivot'].x(),point.y()-drag['pivot'].y())/drag['point_distance']))
+            elif mode=='rotate':session['angle']=drag['angle']+math.degrees(math.atan2(point.y()-drag['pivot'].y(),point.x()-drag['pivot'].x()))-drag['point_angle']
+        else:
+            vals=drag['values'][:]
+            if mode=='move':vals[0]+=dx;vals[1]+=dy
+            elif mode=='pivot':session['pivot']+=QPointF(dx,dy);drag['start']=QPointF(point)
+            elif mode=='scale':vals[2]=max(1,min(400,vals[2]*math.hypot(point.x()-drag['pivot'].x(),point.y()-drag['pivot'].y())/drag['point_distance']))
+            elif mode=='rotate':vals[3]+=math.degrees(math.atan2(point.y()-drag['pivot'].y(),point.x()-drag['pivot'].x()))-drag['point_angle']
+            session['values']=vals
+        self.update()
+
+    def apply_transform(self):
+        session=self.transform_session
+        if session is None:return
+        if session['kind']=='raster':
+            layer=self.layer_by_id(session['id'])
+            if layer is not None:
+                before=session['source']
+                after=self._transformed_layer_image(session)
+                if before!=after:
+                    layer.image=after
+                    self._push(dict(type='patch',id=layer.id,frame=session['frame'],rect=after.rect(),before=before,after=after.copy()))
+        else:
+            obj=self.active_motion()
+            if obj and obj.id==session['id']:
+                values=session['values']
+                self.set_motion_key(*values)
+        self.cancel_transform()
+        self.document_changed.emit()
+        self.frames_changed.emit()
 
     def _mark_dirty(self):
         self.dirty = True
@@ -529,6 +705,15 @@ class Canvas(QWidget):
                 if layer:
                     frame.remove(layer)
                     frame.insert(cmd['after'] if forward else cmd['before'], layer)
+        elif typ == 'motion_key':
+            obj = next((x for x in self.motion_objects if x.id == cmd['id']), None)
+            if obj is not None:
+                value = cmd['after'] if forward else cmd['before']
+                if value is None:
+                    obj.keys.pop(cmd['frame'], None)
+                else:
+                    obj.keys[cmd['frame']] = tuple(value)
+                self.motion_changed.emit()
         elif typ in ('frame_add', 'frame_delete'):
             # Retain the exact removed/inserted cel objects, including static-layer
             # sharing. A command stores before/after key maps for every motion object.
@@ -654,6 +839,18 @@ class Canvas(QWidget):
     def deselect(self):
         self.set_selection(None)
 
+    def keyPressEvent(self, event):
+        if self.transform_session is not None:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.apply_transform()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Escape:
+                self.cancel_transform()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def _point(self, position):
         return QPoint(max(0, min(self.width_px-1, int(position.x()))),
                       max(0, min(self.height_px-1, int(position.y()))))
@@ -662,7 +859,9 @@ class Canvas(QWidget):
         if self.playing:
             return
         point = self._point(position)
-        if self.tool == 'select':
+        if self.tool == 'transform':
+            self._transform_press(QPointF(position))
+        elif self.tool == 'select':
             self.drag_origin = point
             self.drag_rect = QRect(point, point).normalized()
             self.update()
@@ -680,6 +879,9 @@ class Canvas(QWidget):
             self.update()
 
     def _update_interaction(self, position):
+        if self.tool == 'transform' and self.transform_drag is not None:
+            self._transform_move(QPointF(position))
+            return
         if self.drag_origin is None:
             return
         point = self._point(position)
@@ -691,6 +893,10 @@ class Canvas(QWidget):
         self.update()
 
     def _finish_interaction(self, position):
+        if self.tool == 'transform' and self.transform_drag is not None:
+            self._transform_move(QPointF(position))
+            self.transform_drag = None
+            return
         if self.drag_origin is None:
             return
         self._update_interaction(position)
@@ -762,13 +968,13 @@ class Canvas(QWidget):
         elif typ == QEvent.Type.TabletMove:
             if self.drawing and self.input_kind == 'tablet':
                 self.stroke(event.position() / self.zoom, pressure, True)
-            elif self.drag_origin is not None:
+            elif self.drag_origin is not None or self.transform_drag is not None:
                 self._update_interaction(event.position() / self.zoom)
         elif typ == QEvent.Type.TabletRelease:
             if self.drawing and self.input_kind == 'tablet':
                 self.stroke(event.position() / self.zoom, pressure, True)
                 self._end_stroke()
-            if self.drag_origin is not None:
+            if self.drag_origin is not None or self.transform_drag is not None:
                 self._finish_interaction(event.position() / self.zoom)
             self.ignore_mouse = False
         self.diagnostic.emit(f'TABLET: {name} | pressure: {pressure:.3f} | tilt: '
@@ -796,7 +1002,7 @@ class Canvas(QWidget):
         if (not self.ignore_mouse and self.drawing and self.input_kind == 'mouse'
                 and event.buttons() & Qt.MouseButton.LeftButton):
             self.stroke(event.position() / self.zoom, 1.0, False)
-        elif self.drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
+        elif (self.drag_origin is not None or self.transform_drag is not None) and event.buttons() & Qt.MouseButton.LeftButton:
             self._update_interaction(event.position() / self.zoom)
         event.accept()
 
@@ -804,7 +1010,7 @@ class Canvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.input_kind == 'mouse':
                 self._end_stroke()
-            if self.drag_origin is not None:
+            if self.drag_origin is not None or self.transform_drag is not None:
                 self._finish_interaction(event.position() / self.zoom)
         event.accept()
 
@@ -858,6 +1064,8 @@ class Canvas(QWidget):
         self.update()
 
     def change_frame(self, index, playback=False):
+        if self.transform_session is not None:
+            self.cancel_transform()
         if self.drawing or self.drag_origin is not None or not 0 <= index < len(self.frames):
             return
         if index == self.frame_index:
@@ -928,6 +1136,7 @@ class Canvas(QWidget):
         return image
 
     def reset_document(self, width=WIDTH, height=HEIGHT):
+        self.cancel_transform()
         self.drawing = False
         self.drag_origin = None
         self.drag_rect = None
@@ -1162,7 +1371,7 @@ class MainWindow(QMainWindow):
         left.addWidget(QLabel('TOOLS'))
         self.tool_buttons = {}
         for tool, text in [('brush','Brush'), ('eraser','Eraser'),
-                           ('select','Rectangle Select'), ('move','Move Pixels')]:
+                           ('select','Rectangle Select'), ('move','Move Pixels'), ('transform','Transform')]:
             b = QPushButton(text)
             b.setCheckable(True)
             b.setMinimumWidth(130)
@@ -1170,6 +1379,17 @@ class MainWindow(QMainWindow):
             self.tool_buttons[tool] = b
             left.addWidget(b)
         self.tool_buttons['brush'].setChecked(True)
+        transform_buttons = QHBoxLayout()
+        apply_button = QPushButton('Apply Transform')
+        apply_button.clicked.connect(self.canvas.apply_transform)
+        transform_buttons.addWidget(apply_button)
+        cancel_button = QPushButton('Cancel Transform')
+        cancel_button.clicked.connect(self.canvas.cancel_transform)
+        transform_buttons.addWidget(cancel_button)
+        left.addLayout(transform_buttons)
+        self.motion_transform_button = QPushButton('Transform Motion Object')
+        self.motion_transform_button.clicked.connect(self.activate_motion_transform)
+        left.addWidget(self.motion_transform_button)
         left.addWidget(QLabel('Brush / eraser diameter'))
         size_row = QHBoxLayout()
         self.size_input = QSpinBox()
@@ -1475,13 +1695,23 @@ class MainWindow(QMainWindow):
         self.pause_playback()
         self.canvas.change_frame(0, playback=True)
 
+    def activate_motion_transform(self):
+        if self.canvas.begin_transform(motion=True):
+            for name, button in self.tool_buttons.items():
+                button.setChecked(name == 'transform')
+            self.return_canvas_focus()
+
     def set_tool(self, tool):
         old_tool = self.canvas.tool
         if old_tool == 'eraser':
             self.canvas.eraser_size = self.canvas.size
         elif old_tool == 'brush':
             self.canvas.brush_settings[self.canvas.brush_preset]['size'] = self.canvas.size
-        self.canvas.change_tool(tool)
+        if tool == 'transform':
+            self.canvas.begin_transform(motion=False)
+        else:
+            self.canvas.cancel_transform()
+            self.canvas.change_tool(tool)
         if old_tool != tool and tool in ('brush', 'eraser'):
             size = self.canvas.eraser_size if tool == 'eraser' else self.canvas.brush_settings[self.canvas.brush_preset]['size']
             self.size_input.setValue(size)
