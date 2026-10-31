@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.17.4: stable mixed tablet/mouse panning."""
+"""Linux Animation Studio v0.17.5: tablet pan continuity and diagnostics."""
 import io
 import os
 import math
@@ -1444,11 +1444,12 @@ class Canvas(QWidget):
 
 
 class PannableScrollArea(QScrollArea):
-    """Pan with Space + mouse/stylus drag or with the middle mouse button.
+    """Workspace pan controller, with a single preferred stylus event stream.
 
-    Capture Space before focused buttons handle it as an activation key.  Tablet
-    events must be handled directly: Qt does not guarantee synthesized mouse
-    events for pressure-sensitive pen input.
+    Qt/Wayland can deliver tablet input to a different child widget as the
+    scrolled canvas moves. Keep observing the gesture application-wide until
+    its originating device releases, instead of requiring the target to remain
+    the canvas or viewport.
     """
     def __init__(self):
         super().__init__()
@@ -1457,6 +1458,8 @@ class PannableScrollArea(QScrollArea):
         self._last_global = QPoint()
         self._space_down = False
         self._canvas = None
+        self._pan_debug = os.environ.get('LAS_PAN_DEBUG', '').lower() in ('1', 'true', 'yes')
+        self._pan_samples = 0
         self.viewport().installEventFilter(self)
         QApplication.instance().installEventFilter(self)
 
@@ -1465,80 +1468,93 @@ class PannableScrollArea(QScrollArea):
         self._canvas = widget
         widget.installEventFilter(self)
 
+    def _log_pan(self, message):
+        if self._pan_debug:
+            print('[LAS PAN]', message, flush=True)
+
     def _stop_pan(self):
+        if self._pan_active:
+            self._log_pan('STOP source=' + str(self._pan_source))
         self._pan_active = False
         self._pan_source = None
-        self.viewport().unsetCursor()
+        self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         if self._canvas is not None:
             self._canvas.unsetCursor()
 
     def eventFilter(self, obj, event):
         t = event.type()
-
-        # QApplication-level event filter receives key events *before* the
-        # focused QPushButton, which otherwise treats Space as another click.
-        # Only consume keys while this application's main window is active.
         if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Space:
             if self.window().isActiveWindow():
                 self._space_down = t == QEvent.Type.KeyPress
-                if t == QEvent.Type.KeyRelease and self._pan_active:
+                if t == QEvent.Type.KeyRelease:
                     self._stop_pan()
-                return True
+                return True  # Never let Space click a focused QPushButton.
             return False
 
-        if t == QEvent.Type.ApplicationDeactivate:
-            self._space_down = False
-            self._stop_pan()
+        if t in (QEvent.Type.ApplicationDeactivate, QEvent.Type.WindowDeactivate):
+            if t == QEvent.Type.ApplicationDeactivate or obj is self.window():
+                self._space_down = False
+                self._stop_pan()
             return False
 
-        if obj is not self.viewport() and obj is not self._canvas:
-            return False
-
-        mouse_press = t == QEvent.Type.MouseButtonPress
         tablet_press = t == QEvent.Type.TabletPress
-        mouse_move = t == QEvent.Type.MouseMove
         tablet_move = t == QEvent.Type.TabletMove
-        mouse_release = t == QEvent.Type.MouseButtonRelease
         tablet_release = t == QEvent.Type.TabletRelease
+        mouse_press = t == QEvent.Type.MouseButtonPress
+        mouse_move = t == QEvent.Type.MouseMove
+        mouse_release = t == QEvent.Type.MouseButtonRelease
 
-        if mouse_press or tablet_press:
+        # Only START on the canvas or its viewport. But an ACTIVE pan must
+        # receive events regardless of their destination in this application.
+        on_canvas = obj is self._canvas or obj is self.viewport()
+        if (tablet_press or mouse_press) and (on_canvas or self._pan_active):
             middle = mouse_press and event.button() == Qt.MouseButton.MiddleButton
             left = mouse_press and event.button() == Qt.MouseButton.LeftButton
-            if middle or (self._space_down and (left or tablet_press)):
-                # On some Wacom/Wayland combinations Qt can deliver both
-                # TabletPress and a synthesized MouseButtonPress.  Do not
-                # restart an already-active drag or reset its origin.
+            if middle or (self._space_down and (tablet_press or left)):
                 if not self._pan_active:
                     self._pan_active = True
                     self._pan_source = 'tablet' if tablet_press else 'mouse'
                     self._last_global = event.globalPosition().toPoint()
-                elif tablet_press:
-                    # Direct tablet input takes precedence over mouse emulation.
+                    self._pan_samples = 0
+                    self._log_pan('START ' + self._pan_source + ' at ' + str(self._last_global))
+                elif tablet_press and self._pan_source == 'mouse':
+                    # Prefer a real tablet stream to Qt's synthetic mouse
+                    # events. Reset origin once when changing ownership.
                     self._pan_source = 'tablet'
+                    self._last_global = event.globalPosition().toPoint()
+                    self._log_pan('SWITCH to tablet')
                 self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
                 if self._canvas is not None:
                     self._canvas.setCursor(Qt.CursorShape.ClosedHandCursor)
                 event.accept()
                 return True
 
-        if self._pan_active and (mouse_move or tablet_move):
-            # Work with whichever stream Qt actually supplies during the drag.
-            # Qt/Wayland may switch between tablet and synthesized mouse moves.
-            # Global coordinates also avoid jumps when scrollbars reposition the
-            # canvas widget beneath the pen.  Duplicate positions are harmless.
+        if self._pan_active and (tablet_move or mouse_move):
+            # Mouse events accompanying tablet input can have stale positions.
+            # Never let them corrupt the last known tablet position.
+            if self._pan_source == 'tablet' and mouse_move:
+                event.accept()
+                return True
             current = event.globalPosition().toPoint()
             delta = current - self._last_global
             if not delta.isNull():
                 self._last_global = current
-                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+                h = self.horizontalScrollBar()
+                v = self.verticalScrollBar()
+                before = (h.value(), v.value())
+                h.setValue(before[0] - delta.x())
+                v.setValue(before[1] - delta.y())
+                self._pan_samples += 1
+                if self._pan_debug and self._pan_samples % 8 == 1:
+                    self._log_pan('MOVE source=' + self._pan_source + ' delta=' + str(delta)
+                                  + ' scroll=' + str(before) + '->' + str((h.value(), v.value()))
+                                  + ' limits=' + str((h.maximum(), v.maximum())))
             event.accept()
             return True
 
         if self._pan_active and (mouse_release or tablet_release):
-            # Ignore a synthetic mouse release while the tablet still owns the
-            # gesture; it can otherwise end the pan before the stylus lifts.
-            if tablet_release or (mouse_release and self._pan_source == 'mouse'):
+            # Synthetic mouse releases must not terminate a tablet pan.
+            if (self._pan_source == 'tablet' and tablet_release) or (self._pan_source == 'mouse' and mouse_release):
                 self._stop_pan()
             event.accept()
             return True
