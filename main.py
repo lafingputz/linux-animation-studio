@@ -1849,7 +1849,7 @@ class MainWindow(QMainWindow):
                         ('Alt+Right', lambda: self.navigate_frame(1)),
                         (',', lambda: self.navigate_frame(-1)),
                         ('.', lambda: self.navigate_frame(1)),
-                        ('Space', self.toggle_playback),
+                        ('P', self.toggle_playback),
                         ('Ctrl++', lambda: self.adjust_zoom(1.25)),
                         ('Ctrl+=', lambda: self.adjust_zoom(1.25)),
                         ('Ctrl+-', lambda: self.adjust_zoom(0.8)),

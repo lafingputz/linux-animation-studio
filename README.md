@@ -1,6 +1,34 @@
-# Linux Animation Studio v0.17.1 (Timeline Hotfix)
+# Linux Animation Studio v0.17.2 (Space/Pan Conflict Hotfix)
 
-This hotfix is based on v0.17 and keeps the same v0.16-compatible drawing, brush, project and export features.
+This patch builds on v0.17.1 and fixes the conflicting Space keyboard shortcut.
+
+## Controls
+
+- **Space + left-drag:** Pan the canvas without starting/stopping animation.
+- **Middle-button drag:** Pan the canvas.
+- **P:** Toggle animation playback.
+- **Play/Pause button:** Toggle animation playback.
+- **Ctrl+0:** Fit and center canvas.
+
+The global Space playback shortcut has been removed because it intercepted the Space key required by canvas panning. The existing timeline visibility hotfix and v0.17 workspace improvements remain in place.
+
+## Install
+
+Update the four source files in your GitHub repository, then on the Surface:
+
+```bash
+cd ~/Projects/linux-animation-studio
+git pull --ff-only
+source .venv/bin/activate
+python main.py
+```
+
+## Test
+
+1. Zoom in, hold Space, drag the canvas, and verify playback does not toggle.
+2. Press P and verify playback toggles.
+3. Confirm the Play/Pause button and timeline still work.
+4. With Wacom, test Space + pen drag to check whether Wayland tablet events are handled as mouse events.
 
 ## Fix
 
