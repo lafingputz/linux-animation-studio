@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.17: workspace usability and multi-frame onion skins."""
+"""Linux Animation Studio v0.17.1: timeline visibility hotfix."""
 import io
 import os
 import math
@@ -1707,10 +1707,17 @@ class MainWindow(QMainWindow):
         vertical.addWidget(self.welcome, 1)
         self.welcome.hide()
 
-        self.timeline_container = QWidget()
-        self.timeline_container.setMinimumHeight(0)
-        self.timeline_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        timeline = QVBoxLayout(self.timeline_container)
+        # Keep the timeline in a bounded viewport.  The v0.17 Ignored size policy
+        # allowed Qt to allocate zero pixels while the timeline was still visible.
+        # A scroll area makes its controls reachable without increasing the window's
+        # minimum height on compact displays.
+        self.timeline_container = QScrollArea()
+        self.timeline_container.setWidgetResizable(True)
+        self.timeline_container.setMinimumHeight(120)
+        self.timeline_container.setMaximumHeight(280)
+        self.timeline_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.timeline_content = QWidget()
+        timeline = QVBoxLayout(self.timeline_content)
         timeline.setContentsMargins(4, 3, 4, 3)
         frame_controls = QHBoxLayout()
         for label, func in [('Previous', lambda: self.canvas.change_frame(self.canvas.frame_index-1)),
@@ -1809,7 +1816,7 @@ class MainWindow(QMainWindow):
         self.timeline_toggle = QPushButton('Hide Animation Timeline')
         self.timeline_toggle.clicked.connect(self.toggle_timeline)
         vertical.addWidget(self.timeline_toggle)
-        self.timeline_container.setMaximumHeight(330)
+        self.timeline_container.setWidget(self.timeline_content)
         vertical.addWidget(self.timeline_container, 0)
         vertical.addWidget(self.status)
         self.setCentralWidget(root)
@@ -2287,6 +2294,7 @@ class MainWindow(QMainWindow):
         self.welcome.setVisible(not active)
         self.timeline_toggle.setVisible(active)
         self.timeline_container.setVisible(active)
+        self.timeline_toggle.setText('Hide Animation Timeline' if active else 'Show Animation Timeline')
         for b in self.toolbar_buttons:
             if b.text() not in ('New', 'Open .las'):
                 b.setEnabled(active)
