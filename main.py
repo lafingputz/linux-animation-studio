@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.17.3: Wacom pan and Space focus hotfix."""
+"""Linux Animation Studio v0.17.4: stable mixed tablet/mouse panning."""
 import io
 import os
 import math
@@ -1505,9 +1505,16 @@ class PannableScrollArea(QScrollArea):
             middle = mouse_press and event.button() == Qt.MouseButton.MiddleButton
             left = mouse_press and event.button() == Qt.MouseButton.LeftButton
             if middle or (self._space_down and (left or tablet_press)):
-                self._pan_active = True
-                self._pan_source = 'tablet' if tablet_press else 'mouse'
-                self._last_global = event.globalPosition().toPoint()
+                # On some Wacom/Wayland combinations Qt can deliver both
+                # TabletPress and a synthesized MouseButtonPress.  Do not
+                # restart an already-active drag or reset its origin.
+                if not self._pan_active:
+                    self._pan_active = True
+                    self._pan_source = 'tablet' if tablet_press else 'mouse'
+                    self._last_global = event.globalPosition().toPoint()
+                elif tablet_press:
+                    # Direct tablet input takes precedence over mouse emulation.
+                    self._pan_source = 'tablet'
                 self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
                 if self._canvas is not None:
                     self._canvas.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -1515,10 +1522,13 @@ class PannableScrollArea(QScrollArea):
                 return True
 
         if self._pan_active and (mouse_move or tablet_move):
-            # Ignore emulated mouse events while handling direct stylus input.
-            if (tablet_move and self._pan_source == 'tablet') or (mouse_move and self._pan_source == 'mouse'):
-                current = event.globalPosition().toPoint()
-                delta = current - self._last_global
+            # Work with whichever stream Qt actually supplies during the drag.
+            # Qt/Wayland may switch between tablet and synthesized mouse moves.
+            # Global coordinates also avoid jumps when scrollbars reposition the
+            # canvas widget beneath the pen.  Duplicate positions are harmless.
+            current = event.globalPosition().toPoint()
+            delta = current - self._last_global
+            if not delta.isNull():
                 self._last_global = current
                 self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
                 self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
@@ -1526,7 +1536,10 @@ class PannableScrollArea(QScrollArea):
             return True
 
         if self._pan_active and (mouse_release or tablet_release):
-            self._stop_pan()
+            # Ignore a synthetic mouse release while the tablet still owns the
+            # gesture; it can otherwise end the pan before the stylus lifts.
+            if tablet_release or (mouse_release and self._pan_source == 'mouse'):
+                self._stop_pan()
             event.accept()
             return True
 
