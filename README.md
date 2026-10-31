@@ -1,4 +1,27 @@
-# Linux Animation Studio v0.17.5
+# Linux Animation Studio v0.17.6 — canvas navigation candidate
+
+This release builds on v0.17.5. It introduces a shared navigation state machine (`idle`, `armed`, `dragging`) and a dedicated **Pan Canvas** tool alongside Space+Wacom drag. `LAS_PAN_DEBUG=1` logs explicit stop reasons such as `tablet_release`, `space_released`, `window_deactivated`, or `tool_changed`.
+
+## Test on the Surface Pro 3
+
+1. Zoom to 400%. With the Brush selected, hold Space and drag continuously with the Wacom pen. Panning should continue for the full gesture.
+2. Select **Pan Canvas** in the left panel and drag with the Wacom **without Space**. Confirm it pans and does not draw.
+3. Lift the pen and drag again. Release Space to return to Brush behavior, or switch from Pan to Brush.
+4. Ensure there are no stray marks; confirm alignment after panning and zooming.
+5. Press Space while a button is focused to confirm it does not activate. Press **P** to test playback.
+6. Retest the timeline, onion skins, custom brushes, project saving, and exports.
+
+## Diagnostics if the pan still interrupts
+
+```bash
+LAS_PAN_DEBUG=1 python main.py 2>&1 | tee ~/las-pan-debug.log
+```
+
+Look for `STOP reason=tablet_release` while the pen is still physically down. That would identify unexpected tablet release delivery, rather than scrollbar limits or keyboard focus. If events stop without `STOP`, it points to event routing or tablet delivery instead. Review pointer coordinates before sharing logs.
+
+This source is syntax-checked, but live Qt/Wacom behavior still requires testing under Pop!_OS/Wayland.
+
+# Linux Animation Studio v0.17.6
 
 Targeted canvas-navigation candidate fix for a Wacom stylus pan that begins moving and then stops before the pen is lifted (Pop!_OS, Wayland).
 

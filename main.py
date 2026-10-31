@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.17.5: tablet pan continuity and diagnostics."""
+"""Linux Animation Studio v0.17.6: explicit navigation states and Pan tool."""
 import io
 import os
 import math
@@ -1444,18 +1444,20 @@ class Canvas(QWidget):
 
 
 class PannableScrollArea(QScrollArea):
-    """Workspace pan controller, with a single preferred stylus event stream.
+    """One pan state machine for tablet and mouse input.
 
-    Qt/Wayland can deliver tablet input to a different child widget as the
-    scrolled canvas moves. Keep observing the gesture application-wide until
-    its originating device releases, instead of requiring the target to remain
-    the canvas or viewport.
+    ARMED: holding Space or the Pan tool is selected.
+    DRAGGING: an input device owns the drag until its real release, Space-up
+    (temporary pan only), window deactivation, or a new tool selection.
+    The filter observes events globally to survive canvas movement beneath
+    the pointer, but only acts on events from this window.
     """
     def __init__(self):
         super().__init__()
-        self._pan_active = False
+        self._pan_state = 'idle'
         self._pan_source = None
-        self._last_global = QPoint()
+        self._pan_device = None
+        self._last_global = QPointF()
         self._space_down = False
         self._canvas = None
         self._pan_debug = os.environ.get('LAS_PAN_DEBUG', '').lower() in ('1', 'true', 'yes')
@@ -1467,34 +1469,93 @@ class PannableScrollArea(QScrollArea):
         super().setWidget(widget)
         self._canvas = widget
         widget.installEventFilter(self)
+        self._update_mode()
 
     def _log_pan(self, message):
         if self._pan_debug:
             print('[LAS PAN]', message, flush=True)
 
-    def _stop_pan(self):
-        if self._pan_active:
-            self._log_pan('STOP source=' + str(self._pan_source))
-        self._pan_active = False
-        self._pan_source = None
-        self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+    def _is_pan_tool(self):
+        return self._canvas is not None and self._canvas.tool == 'pan'
+
+    def _pan_enabled(self):
+        return self._space_down or self._is_pan_tool()
+
+    def _set_cursor(self):
+        cursor = (Qt.CursorShape.ClosedHandCursor if self._pan_state == 'dragging'
+                  else Qt.CursorShape.OpenHandCursor if self._pan_enabled()
+                  else Qt.CursorShape.ArrowCursor)
+        self.viewport().setCursor(cursor)
         if self._canvas is not None:
-            self._canvas.unsetCursor()
+            if self._pan_enabled():
+                self._canvas.setCursor(cursor)
+            else:
+                self._canvas.refresh_cursor()
+
+    def _update_mode(self):
+        if self._pan_state != 'dragging':
+            self._pan_state = 'armed' if self._pan_enabled() else 'idle'
+        self._set_cursor()
+
+    def tool_changed(self):
+        if self._pan_state == 'dragging' and not self._space_down:
+            self._stop_pan('tool_changed')
+        self._update_mode()
+
+    def _stop_pan(self, reason):
+        if self._pan_state == 'dragging':
+            self._log_pan('STOP reason=' + reason + ' source=' + str(self._pan_source)
+                          + ' samples=' + str(self._pan_samples))
+        self._pan_source = None
+        self._pan_device = None
+        self._pan_state = 'armed' if self._pan_enabled() else 'idle'
+        self._set_cursor()
+
+    def _start_pan(self, event, source):
+        self._pan_state = 'dragging'
+        self._pan_source = source
+        self._pan_device = event.pointingDevice() if source == 'tablet' else None
+        self._last_global = QPointF(event.globalPosition())
+        self._pan_samples = 0
+        self._log_pan('START source=' + source + ' device=' +
+                      (self._pan_device.name() if self._pan_device else 'mouse') +
+                      ' global=' + str(self._last_global))
+        self._set_cursor()
+
+    def _continue_pan(self, event):
+        current = QPointF(event.globalPosition())
+        delta = current - self._last_global
+        self._last_global = current
+        h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+        before = (h.value(), v.value())
+        # Use floating-point input positions and round the requested movement,
+        # so subpixel pen movements don't disappear on HiDPI displays.
+        h.setValue(round(before[0] - delta.x()))
+        v.setValue(round(before[1] - delta.y()))
+        self._pan_samples += 1
+        if self._pan_debug and (self._pan_samples % 8 == 1 or self._pan_samples <= 2):
+            self._log_pan('MOVE source=' + str(self._pan_source) +
+                          ' delta=' + str(delta) + ' scroll=' + str(before) +
+                          '->' + str((h.value(), v.value())) +
+                          ' limits=' + str((h.maximum(), v.maximum())))
 
     def eventFilter(self, obj, event):
         t = event.type()
         if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Space:
             if self.window().isActiveWindow():
-                self._space_down = t == QEvent.Type.KeyPress
-                if t == QEvent.Type.KeyRelease:
-                    self._stop_pan()
-                return True  # Never let Space click a focused QPushButton.
+                if not event.isAutoRepeat():
+                    self._space_down = t == QEvent.Type.KeyPress
+                    if t == QEvent.Type.KeyRelease and self._pan_state == 'dragging' and not self._is_pan_tool():
+                        self._stop_pan('space_released')
+                    self._update_mode()
+                return True  # Prevent QPushButton focus from reactivating.
             return False
 
         if t in (QEvent.Type.ApplicationDeactivate, QEvent.Type.WindowDeactivate):
             if t == QEvent.Type.ApplicationDeactivate or obj is self.window():
                 self._space_down = False
-                self._stop_pan()
+                self._stop_pan('window_deactivated')
+                self._update_mode()
             return False
 
         tablet_press = t == QEvent.Type.TabletPress
@@ -1503,62 +1564,61 @@ class PannableScrollArea(QScrollArea):
         mouse_press = t == QEvent.Type.MouseButtonPress
         mouse_move = t == QEvent.Type.MouseMove
         mouse_release = t == QEvent.Type.MouseButtonRelease
+        if not (tablet_press or tablet_move or tablet_release or mouse_press or mouse_move or mouse_release):
+            return False
 
-        # Only START on the canvas or its viewport. But an ACTIVE pan must
-        # receive events regardless of their destination in this application.
+        # This is an application-wide filter, so never consume events from other windows.
+        if isinstance(obj, QWidget) and obj.window() is not self.window():
+            return False
         on_canvas = obj is self._canvas or obj is self.viewport()
-        if (tablet_press or mouse_press) and (on_canvas or self._pan_active):
-            middle = mouse_press and event.button() == Qt.MouseButton.MiddleButton
-            left = mouse_press and event.button() == Qt.MouseButton.LeftButton
-            if middle or (self._space_down and (tablet_press or left)):
-                if not self._pan_active:
-                    self._pan_active = True
-                    self._pan_source = 'tablet' if tablet_press else 'mouse'
-                    self._last_global = event.globalPosition().toPoint()
-                    self._pan_samples = 0
-                    self._log_pan('START ' + self._pan_source + ' at ' + str(self._last_global))
-                elif tablet_press and self._pan_source == 'mouse':
-                    # Prefer a real tablet stream to Qt's synthetic mouse
-                    # events. Reset origin once when changing ownership.
-                    self._pan_source = 'tablet'
-                    self._last_global = event.globalPosition().toPoint()
-                    self._log_pan('SWITCH to tablet')
-                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
-                if self._canvas is not None:
-                    self._canvas.setCursor(Qt.CursorShape.ClosedHandCursor)
+        if self._pan_state != 'dragging':
+            if not on_canvas:
+                return False
+            is_middle = mouse_press and event.button() == Qt.MouseButton.MiddleButton
+            is_left = mouse_press and event.button() == Qt.MouseButton.LeftButton
+            if (tablet_press and self._pan_enabled()) or is_middle or (is_left and self._pan_enabled()):
+                self._start_pan(event, 'tablet' if tablet_press else 'mouse')
                 event.accept()
                 return True
+            return False
 
-        if self._pan_active and (tablet_move or mouse_move):
-            # Mouse events accompanying tablet input can have stale positions.
-            # Never let them corrupt the last known tablet position.
-            if self._pan_source == 'tablet' and mouse_move:
+        # Once a tablet drag owns navigation, Qt's synthesized mouse input
+        # must not replace its position or end the gesture.
+        if self._pan_source == 'tablet':
+            if mouse_press or mouse_move or mouse_release:
                 event.accept()
                 return True
-            current = event.globalPosition().toPoint()
-            delta = current - self._last_global
-            if not delta.isNull():
-                self._last_global = current
-                h = self.horizontalScrollBar()
-                v = self.verticalScrollBar()
-                before = (h.value(), v.value())
-                h.setValue(before[0] - delta.x())
-                v.setValue(before[1] - delta.y())
-                self._pan_samples += 1
-                if self._pan_debug and self._pan_samples % 8 == 1:
-                    self._log_pan('MOVE source=' + self._pan_source + ' delta=' + str(delta)
-                                  + ' scroll=' + str(before) + '->' + str((h.value(), v.value()))
-                                  + ' limits=' + str((h.maximum(), v.maximum())))
-            event.accept()
-            return True
-
-        if self._pan_active and (mouse_release or tablet_release):
-            # Synthetic mouse releases must not terminate a tablet pan.
-            if (self._pan_source == 'tablet' and tablet_release) or (self._pan_source == 'mouse' and mouse_release):
-                self._stop_pan()
-            event.accept()
-            return True
-
+            if event.pointingDevice() != self._pan_device:
+                return False
+            if tablet_move:
+                self._continue_pan(event)
+                event.accept()
+                return True
+            if tablet_release:
+                self._stop_pan('tablet_release')
+                event.accept()
+                return True
+            if tablet_press:
+                self._log_pan('DUPLICATE tablet_press ignored')
+                event.accept()
+                return True
+        else:
+            if tablet_press:
+                # On Wayland a tablet press can arrive after a synthesized
+                # mouse press. Promote ownership to the actual tablet.
+                self._start_pan(event, 'tablet')
+                event.accept()
+                return True
+            if tablet_move or tablet_release:
+                return False
+            if mouse_move:
+                self._continue_pan(event)
+                event.accept()
+                return True
+            if mouse_release:
+                self._stop_pan('mouse_release')
+                event.accept()
+                return True
         return False
 
 
@@ -1617,7 +1677,7 @@ class MainWindow(QMainWindow):
         left.addWidget(QLabel('TOOLS'))
         self.tool_buttons = {}
         for tool, text in [('brush','Brush'), ('eraser','Eraser'),
-                           ('select','Rectangle Select'), ('move','Move Pixels'), ('transform','Transform')]:
+                           ('select','Rectangle Select'), ('move','Move Pixels'), ('transform','Transform'), ('pan','Pan Canvas')]:
             b = QPushButton(text)
             b.setCheckable(True)
             b.setMinimumWidth(130)
@@ -2037,6 +2097,7 @@ class MainWindow(QMainWindow):
             self.size_input.setValue(size)
         for name, button in self.tool_buttons.items():
             button.setChecked(name == self.canvas.tool)
+        self.canvas_scroll.tool_changed()
 
     def adjust_brush(self, offset):
         if QApplication.focusWidget() is self.size_input or QApplication.focusWidget() is self.opacity_input:
