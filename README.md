@@ -1,20 +1,17 @@
-# Linux Animation Studio v0.17.2 (Space/Pan Conflict Hotfix)
+# Linux Animation Studio v0.17.3
 
-This patch builds on v0.17.1 and fixes the conflicting Space keyboard shortcut.
+This is a focused input fix built on v0.17.2.
 
-## Controls
+## Fixes
+- Space held while dragging on the canvas now pans using **direct Wacom tablet events** as well as mouse events.
+- Space keypresses are intercepted while the main application window is active, so the last-focused Qt button is not triggered repeatedly.
+- Middle mouse drag remains a pan shortcut.
+- Playback is still assigned to **P** or the Play button.
+- Release Space to return to drawing.
+- Focus loss cancels Space and panning state.
 
-- **Space + left-drag:** Pan the canvas without starting/stopping animation.
-- **Middle-button drag:** Pan the canvas.
-- **P:** Toggle animation playback.
-- **Play/Pause button:** Toggle animation playback.
-- **Ctrl+0:** Fit and center canvas.
-
-The global Space playback shortcut has been removed because it intercepted the Space key required by canvas panning. The existing timeline visibility hotfix and v0.17 workspace improvements remain in place.
-
-## Install
-
-Update the four source files in your GitHub repository, then on the Surface:
+## Installation
+Replace the four repository files with those in the zip, commit and pull on the Surface:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -23,37 +20,11 @@ source .venv/bin/activate
 python main.py
 ```
 
-## Test
+## Tests to run
+1. Click Brush, Eraser, Play, and other UI buttons; press Space afterward. No button should reactivate.
+2. Zoom in until both scrollbars have room to move. Hold Space and drag using the Wacom pen. No stroke should be created.
+3. Release Space and draw normally; pressure should still work.
+4. Test middle mouse drag, `P` playback, and Wacom alignment after panning.
+5. Hide/show the timeline and verify it still stays onscreen.
 
-1. Zoom in, hold Space, drag the canvas, and verify playback does not toggle.
-2. Press P and verify playback toggles.
-3. Confirm the Play/Pause button and timeline still work.
-4. With Wacom, test Space + pen drag to check whether Wayland tablet events are handled as mouse events.
-
-## Fix
-
-- Restores the animation timeline that was invisible due to a zero-height layout allocation.
-- Replaces the timeline area with a height-bounded, scrollable panel so controls remain reachable on the Surface Pro 3 without resizing the application beyond the screen.
-- Synchronizes the timeline toggle label with visibility when a project opens or closes.
-- No changes to `.las` format, brush libraries, or frame data.
-
-## Install
-
-Update `main.py`, `README.md`, `requirements.txt`, and `.gitignore` in your GitHub repository. On the Surface:
-
-```bash
-cd ~/Projects/linux-animation-studio
-git pull --ff-only
-source .venv/bin/activate
-python main.py
-```
-
-## Test
-
-1. Create or open a project: timeline frame thumbnails and FPS/onion controls should be visible.
-2. Hide and show the timeline repeatedly: label should match state.
-3. Scroll inside the timeline to reach controls and thumbnails.
-4. Repeat maximized and verify the window never extends off-screen.
-5. Verify drawing, Wacom pressure, onion skinning, saving, and animation export remain functional.
-
-This build passes Python syntax compilation but has not been tested in a live Qt GUI on the Surface Pro 3.
+Note: Source compilation checks pass, but this patch has not been interactively tested with your Surface, Wacom, or Wayland installation.

@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.17.1: timeline visibility hotfix."""
+"""Linux Animation Studio v0.17.3: Wacom pan and Space focus hotfix."""
 import io
 import os
 import math
@@ -1444,14 +1444,20 @@ class Canvas(QWidget):
 
 
 class PannableScrollArea(QScrollArea):
-    """Viewport navigation, independent of canvas input and drawing state."""
+    """Pan with Space + mouse/stylus drag or with the middle mouse button.
+
+    Capture Space before focused buttons handle it as an activation key.  Tablet
+    events must be handled directly: Qt does not guarantee synthesized mouse
+    events for pressure-sensitive pen input.
+    """
     def __init__(self):
         super().__init__()
         self._pan_active = False
-        self._last = QPoint()
+        self._pan_source = None
+        self._last_global = QPoint()
         self._space_down = False
-        self.viewport().installEventFilter(self)
         self._canvas = None
+        self.viewport().installEventFilter(self)
         QApplication.instance().installEventFilter(self)
 
     def setWidget(self, widget):
@@ -1459,47 +1465,72 @@ class PannableScrollArea(QScrollArea):
         self._canvas = widget
         widget.installEventFilter(self)
 
+    def _stop_pan(self):
+        self._pan_active = False
+        self._pan_source = None
+        self.viewport().unsetCursor()
+        if self._canvas is not None:
+            self._canvas.unsetCursor()
+
     def eventFilter(self, obj, event):
-        if obj is QApplication.instance():
-            return False
-        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            self._space_down = True
-        if event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space:
-            self._space_down = False
-        if obj is self.viewport() or obj is self._canvas:
-            t = event.type()
-            if t == QEvent.Type.MouseButtonPress and (event.button() == Qt.MouseButton.MiddleButton or
-                (self._space_down and event.button() == Qt.MouseButton.LeftButton)):
-                self._pan_active = True
-                self._last = obj.mapTo(self.viewport(), event.position().toPoint())
-                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        t = event.type()
+
+        # QApplication-level event filter receives key events *before* the
+        # focused QPushButton, which otherwise treats Space as another click.
+        # Only consume keys while this application's main window is active.
+        if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Space:
+            if self.window().isActiveWindow():
+                self._space_down = t == QEvent.Type.KeyPress
+                if t == QEvent.Type.KeyRelease and self._pan_active:
+                    self._stop_pan()
                 return True
-            if t == QEvent.Type.MouseMove and self._pan_active:
-                current = obj.mapTo(self.viewport(), event.position().toPoint())
-                delta = current - self._last
-                self._last = current
+            return False
+
+        if t == QEvent.Type.ApplicationDeactivate:
+            self._space_down = False
+            self._stop_pan()
+            return False
+
+        if obj is not self.viewport() and obj is not self._canvas:
+            return False
+
+        mouse_press = t == QEvent.Type.MouseButtonPress
+        tablet_press = t == QEvent.Type.TabletPress
+        mouse_move = t == QEvent.Type.MouseMove
+        tablet_move = t == QEvent.Type.TabletMove
+        mouse_release = t == QEvent.Type.MouseButtonRelease
+        tablet_release = t == QEvent.Type.TabletRelease
+
+        if mouse_press or tablet_press:
+            middle = mouse_press and event.button() == Qt.MouseButton.MiddleButton
+            left = mouse_press and event.button() == Qt.MouseButton.LeftButton
+            if middle or (self._space_down and (left or tablet_press)):
+                self._pan_active = True
+                self._pan_source = 'tablet' if tablet_press else 'mouse'
+                self._last_global = event.globalPosition().toPoint()
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                if self._canvas is not None:
+                    self._canvas.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return True
+
+        if self._pan_active and (mouse_move or tablet_move):
+            # Ignore emulated mouse events while handling direct stylus input.
+            if (tablet_move and self._pan_source == 'tablet') or (mouse_move and self._pan_source == 'mouse'):
+                current = event.globalPosition().toPoint()
+                delta = current - self._last_global
+                self._last_global = current
                 self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
                 self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
-                return True
-            if t == QEvent.Type.MouseButtonRelease and self._pan_active:
-                self._pan_active = False
-                self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
-                return True
-        return super().eventFilter(obj, event)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            self._space_down = True
             event.accept()
-            return
-        super().keyPressEvent(event)
+            return True
 
-    def keyReleaseEvent(self, event):
-        if event.key() == Qt.Key.Key_Space:
-            self._space_down = False
+        if self._pan_active and (mouse_release or tablet_release):
+            self._stop_pan()
             event.accept()
-            return
-        super().keyReleaseEvent(event)
+            return True
+
+        return False
 
 
 class MainWindow(QMainWindow):
