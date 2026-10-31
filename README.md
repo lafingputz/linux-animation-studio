@@ -1,22 +1,20 @@
-# Linux Animation Studio v0.16
+# Linux Animation Studio v0.17
 
-Custom brush dynamics release, built as a drop-in replacement for tested v0.15.
+Small-screen workspace and multi-frame onion-skin update, based on v0.16.
 
-## New for v0.16
+## What's changed
 
-Custom image-tip brushes now support:
-- **Rotate along stroke:** align each stamp with pen travel direction.
-- **Random rotation:** adjustable range ±0–180 degrees per stamp.
-- **Scatter:** randomized horizontal/vertical offsets up to a percentage of nominal brush diameter.
-- **Pressure-to-size strength:** 0% uses constant diameter; 100% maps light-to-heavy pen pressure into smaller-to-larger stamps.
-- **Pressure-to-opacity strength:** 0% ignores pressure for opacity; 100% fades light strokes progressively.
-- **Brush preview:** a small deterministic preview of the chosen custom brush and its dynamics.
+- Custom brush spacing now accepts **1–400%** (previous minimum: 5%). Very dense stamps may be slow on older CPUs.
+- The left settings panel scrolls independently, preventing the brush preview and Delete Brush button from overlapping or pushing other controls out of reach.
+- **Ctrl+0** now calculates a fit-to-viewport zoom and centers the canvas using the scroll area's alignment. **Ctrl+1** is not implemented yet.
+- **Middle-button drag** pans a zoomed canvas; **Space+left-mouse drag** also pans. Pen-as-mouse panning can depend on Wacom/Wayland tablet event routing and should be tested on the actual device.
+- Timeline show/hide now uses a height-constrained container so reopening it should not stretch the application window offscreen.
+- Independent **Previous ghosts** and **Next ghosts** controls (0–6) allow multiple tinted onion skins with distance-dependent fading. Both are saved and restored in `.las` projects.
+- Existing brushes, transforms, motion objects, persistent tracks, selection tools, Wacom pressure, playback, and export paths are retained.
 
-All settings persist in `~/.local/share/linux-animation-studio/brushes/*.json` and are loaded on restart. Older v0.15 brush files automatically get safe defaults. Full-color and tintable stamp modes continue to work.
+## Install on the Surface
 
-## Installation
-
-On your Mac, extract the ZIP and upload `main.py`, `README.md`, `requirements.txt`, `.gitignore` into the **root** of the existing GitHub repository. On your Surface:
+Upload `main.py`, `README.md`, `requirements.txt`, and `.gitignore` to the root of your GitHub repository, commit, then run:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -25,27 +23,27 @@ source .venv/bin/activate
 python main.py
 ```
 
-No new Python libraries are needed. For MP4 export, FFmpeg must remain installed.
+No additional dependencies are required. Keep a known-good v0.16 tag and back up important `.las` projects before testing.
 
-## Important behavior
+## Acceptance tests
 
-These controls apply to **custom image brushes**. The four built-in presets remain unchanged. `Brush preview` is a compact static example refreshed when brush settings change, not an animated preview following the cursor.
+1. Set custom stamp spacing to 1%, 2%, 3%, and 4%. Try dense strokes at different sizes and watch for lag.
+2. With timeline shown on the Surface Pro 3, scroll the left panel all the way to the brush preview and Delete Brush controls. Check that nothing overlaps.
+3. Test Ctrl+0 on small and large documents with timeline open and closed. The document should fit and be centered.
+4. Zoom in, pan with middle-button drag, and test Space+left-drag. Verify normal brush drawing resumes afterwards.
+5. Draw and select at multiple zoom/pan offsets and verify pen-to-pixel alignment.
+6. Repeatedly hide/show timeline while maximized. Window geometry should remain usable.
+7. Set previous ghosts to 3 and next ghosts to 1, then swap counts; verify correct number and progressive fade.
+8. Verify static layers do not appear as onion ghosts and transparent imported artwork preserves alpha.
+9. Save/reopen `.las` and verify onion settings remain, including opening old projects with default 1/1 ghosts.
+10. Regression-test existing custom brushes, raster transforms, frame history, motion keyframes, Wacom pressure, playback, PNG sequences, and MP4 export.
 
-Pressure and scatter are sampled per stamp. Extremely high scatter or dense spacing may affect responsiveness on older hardware; test at moderate values first. The undo subsystem records each stroke as a single operation. `.las` file format remains v4.
+## Testing status
 
-## Suggested acceptance tests
+Python syntax compilation has been checked. The graphical interface, Wacom/Wayland panning, precise geometry, and performance **have not been verified** in this environment.
 
-1. Create a brush from a selection and use it to paint.
-2. Turn **Rotate along stroke** on and draw an S-shaped curve. Stamp orientation should follow the stroke.
-3. Set random rotation to 0, then 90 degrees and compare results.
-4. Set scatter to 0, then 50%, and compare stamp placements.
-5. Test pressure-to-size at 0% and 100% with the Wacom.
-6. Test pressure-to-opacity at 0% and 100% with a tintable brush.
-7. Verify changing advanced controls updates the preview.
-8. Restart the app and confirm controls persist.
-9. Undo and redo custom strokes across frames; save/reopen and export `.las`/PNG/MP4.
-10. Check v0.15 drawing, layers, animation, transform and imported-image onion skin functionality.
+## Known caveats
 
-## Next proposed release
-
-**v0.17: Selection modes**, including Freehand Lasso (close on pen release) and Polygonal Lasso (point-by-point, double-click/return-to-start to close). The selection-mask upgrade will require careful testing across paint, erase, transforms and custom brush creation.
+- At very high brush sizes and 1% spacing, image stamping may produce significant CPU load.
+- A fit zoom below 25% is clamped by the existing zoom limit, so unusually large documents might not fit entirely yet.
+- The timeline reflow and Space+drag behavior require on-device confirmation; if the window still moves offscreen or pen input conflicts with panning, report the exact conditions so the next patch can target them.

@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.16: custom brush dynamics and preview."""
+"""Linux Animation Studio v0.17: workspace usability and multi-frame onion skins."""
 import io
 import os
 import math
@@ -19,7 +19,7 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcu
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
 )
 
 WIDTH, HEIGHT = 1200, 800
@@ -69,7 +69,7 @@ def load_custom_brushes():
             if tip.isNull() or tip.width() > 512 or tip.height() > 512:
                 continue
             brushes[ident] = {'name': str(meta['name']), 'mode': meta['mode'] if meta.get('mode') in ('color','tint') else 'color',
-                              'spacing': max(0.05, min(4.0, float(meta.get('spacing', .30)))),
+                              'spacing': max(0.01, min(4.0, float(meta.get('spacing', .30)))),
                               'size': max(1, min(500, int(meta.get('size', 48)))),
                               'opacity': max(1, min(100, int(meta.get('opacity', 100)))),
                               'follow_direction': bool(meta.get('follow_direction', False)),
@@ -182,6 +182,8 @@ class Canvas(QWidget):
         self.fps = 12
         self.onion_enabled = False
         self.onion_opacity = 35
+        self.onion_previous = 1
+        self.onion_next = 1
         self.playing = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(WIDTH, HEIGHT)
@@ -389,12 +391,14 @@ class Canvas(QWidget):
                 p.setOpacity(1.0)
                 self.draw_motion_objects(p, self.frame_index)
         if self.onion_enabled and not self.playing:
-            for index, tint in ((self.frame_index - 1, QColor('#d65c66')),
-                                (self.frame_index + 1, QColor('#35a87c'))):
-                neighbor = self._tinted_neighbor(index, tint)
-                if neighbor is not None:
-                    p.setOpacity(self.onion_opacity / 100.0)
-                    p.drawImage(0, 0, neighbor)
+            # Composite distant ghosts first, near ghosts last; do not modify source cels.
+            for direction, count, tint in ((-1, self.onion_previous, QColor('#d65c66')),
+                                           (1, self.onion_next, QColor('#35a87c'))):
+                for distance in range(count, 0, -1):
+                    neighbor = self._tinted_neighbor(self.frame_index + direction * distance, tint)
+                    if neighbor is not None:
+                        p.setOpacity((self.onion_opacity / 100.0) * (1.0 / distance))
+                        p.drawImage(0, 0, neighbor)
             p.setOpacity(1.0)
         outlined = None if self.playing else (self.drag_rect if self.drag_rect is not None else self.selection)
         if outlined is not None and not outlined.isEmpty():
@@ -1270,6 +1274,8 @@ class Canvas(QWidget):
         self.fps = 12
         self.onion_enabled = False
         self.onion_opacity = 35
+        self.onion_previous = 1
+        self.onion_next = 1
         self.loop_playback = True
         self._undo.clear()
         self._redo.clear()
@@ -1287,6 +1293,7 @@ class Canvas(QWidget):
                         width=self.width_px, height=self.height_px,
                         active_frame=self.frame_index, fps=self.fps,
                         onion_enabled=self.onion_enabled, onion_opacity=self.onion_opacity,
+                        onion_previous=self.onion_previous, onion_next=self.onion_next,
                         loop_playback=getattr(self, 'loop_playback', True), frames=[], motion_objects=[])
         path = Path(path)
         temporary = path.with_name(path.name + '.tmp')
@@ -1420,6 +1427,8 @@ class Canvas(QWidget):
         self.fps = fps
         self.onion_enabled = bool(info.get('onion_enabled', False))
         self.onion_opacity = max(0, min(100, int(info.get('onion_opacity', 35))))
+        self.onion_previous = max(0, min(6, int(info.get('onion_previous', 1))))
+        self.onion_next = max(0, min(6, int(info.get('onion_next', 1))))
         self.loop_playback = bool(info.get('loop_playback', True))
         self.layers = frames[index]
         self.active_id = active_id
@@ -1432,6 +1441,65 @@ class Canvas(QWidget):
         self.document_changed.emit()
         self.frames_changed.emit()
         self.update()
+
+
+class PannableScrollArea(QScrollArea):
+    """Viewport navigation, independent of canvas input and drawing state."""
+    def __init__(self):
+        super().__init__()
+        self._pan_active = False
+        self._last = QPoint()
+        self._space_down = False
+        self.viewport().installEventFilter(self)
+        self._canvas = None
+        QApplication.instance().installEventFilter(self)
+
+    def setWidget(self, widget):
+        super().setWidget(widget)
+        self._canvas = widget
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is QApplication.instance():
+            return False
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._space_down = True
+        if event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space:
+            self._space_down = False
+        if obj is self.viewport() or obj is self._canvas:
+            t = event.type()
+            if t == QEvent.Type.MouseButtonPress and (event.button() == Qt.MouseButton.MiddleButton or
+                (self._space_down and event.button() == Qt.MouseButton.LeftButton)):
+                self._pan_active = True
+                self._last = obj.mapTo(self.viewport(), event.position().toPoint())
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                return True
+            if t == QEvent.Type.MouseMove and self._pan_active:
+                current = obj.mapTo(self.viewport(), event.position().toPoint())
+                delta = current - self._last
+                self._last = current
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+                return True
+            if t == QEvent.Type.MouseButtonRelease and self._pan_active:
+                self._pan_active = False
+                self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._space_down = True
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Space:
+            self._space_down = False
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -1483,7 +1551,9 @@ class MainWindow(QMainWindow):
         vertical.addLayout(toolbar)
 
         content = QHBoxLayout()
-        left = QVBoxLayout()
+        left_panel = QWidget()
+        left = QVBoxLayout(left_panel)
+        left.setContentsMargins(5, 5, 5, 5)
         left.addWidget(QLabel('TOOLS'))
         self.tool_buttons = {}
         for tool, text in [('brush','Brush'), ('eraser','Eraser'),
@@ -1535,7 +1605,7 @@ class MainWindow(QMainWindow):
         create_layer.clicked.connect(self.make_custom_brush_from_layer)
         left.addWidget(create_layer)
         self.spacing_input = QSpinBox()
-        self.spacing_input.setRange(5, 400)
+        self.spacing_input.setRange(1, 400)
         self.spacing_input.setSuffix(' %')
         self.spacing_input.setValue(30)
         self.spacing_input.valueChanged.connect(self.change_custom_spacing)
@@ -1572,9 +1642,16 @@ class MainWindow(QMainWindow):
         self.brush_opacity.editingFinished.connect(self.return_canvas_focus)
         left.addWidget(self.brush_opacity)
         left.addStretch()
-        content.addLayout(left)
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_scroll.setMinimumWidth(160)
+        settings_scroll.setMaximumWidth(250)
+        settings_scroll.setWidget(left_panel)
+        content.addWidget(settings_scroll)
 
-        scroll = QScrollArea()
+        scroll = PannableScrollArea()
+        self.canvas_scroll = scroll
         scroll.setWidget(self.canvas)
         scroll.setWidgetResizable(False)
         scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1631,7 +1708,10 @@ class MainWindow(QMainWindow):
         self.welcome.hide()
 
         self.timeline_container = QWidget()
+        self.timeline_container.setMinimumHeight(0)
+        self.timeline_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         timeline = QVBoxLayout(self.timeline_container)
+        timeline.setContentsMargins(4, 3, 4, 3)
         frame_controls = QHBoxLayout()
         for label, func in [('Previous', lambda: self.canvas.change_frame(self.canvas.frame_index-1)),
                             ('Next', lambda: self.canvas.change_frame(self.canvas.frame_index+1)),
@@ -1675,6 +1755,20 @@ class MainWindow(QMainWindow):
         play_controls.addWidget(self.onion_spin)
         play_controls.addStretch()
         timeline.addLayout(play_controls)
+        ranges = QHBoxLayout()
+        ranges.addWidget(QLabel('Previous ghosts'))
+        self.onion_previous_input = QSpinBox()
+        self.onion_previous_input.setRange(0, 6)
+        self.onion_previous_input.setValue(self.canvas.onion_previous)
+        self.onion_previous_input.valueChanged.connect(lambda value: self.change_onion_range('previous', value))
+        ranges.addWidget(self.onion_previous_input)
+        ranges.addWidget(QLabel('Next ghosts'))
+        self.onion_next_input = QSpinBox()
+        self.onion_next_input.setRange(0, 6)
+        self.onion_next_input.setValue(self.canvas.onion_next)
+        self.onion_next_input.valueChanged.connect(lambda value: self.change_onion_range('next', value))
+        ranges.addWidget(self.onion_next_input)
+        timeline.addLayout(ranges)
         motion_controls = QHBoxLayout()
         self.motion_create = QPushButton('Make Motion Object from Layer')
         self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
@@ -1715,7 +1809,8 @@ class MainWindow(QMainWindow):
         self.timeline_toggle = QPushButton('Hide Animation Timeline')
         self.timeline_toggle.clicked.connect(self.toggle_timeline)
         vertical.addWidget(self.timeline_toggle)
-        vertical.addWidget(self.timeline_container)
+        self.timeline_container.setMaximumHeight(330)
+        vertical.addWidget(self.timeline_container, 0)
         vertical.addWidget(self.status)
         self.setCentralWidget(root)
         self.refresh_layers()
@@ -1893,6 +1988,19 @@ class MainWindow(QMainWindow):
         visible = not self.timeline_container.isVisible()
         self.timeline_container.setVisible(visible)
         self.timeline_toggle.setText('Hide Animation Timeline' if visible else 'Show Animation Timeline')
+        # Widget visibility must not cause the top-level window to grow beyond the screen.
+        self.centralWidget().updateGeometry()
+        self.canvas_scroll.viewport().update()
+
+    def change_onion_range(self, which, value):
+        if which == 'previous':
+            self.canvas.onion_previous = value
+        else:
+            self.canvas.onion_next = value
+        if self.project_active:
+            self.canvas._mark_dirty()
+        self.canvas.update()
+
 
     def refresh_playhead(self, index):
         self.frame_list.blockSignals(True)
@@ -1921,6 +2029,11 @@ class MainWindow(QMainWindow):
         self.onion_spin.blockSignals(True)
         self.onion_spin.setValue(self.canvas.onion_opacity)
         self.onion_spin.blockSignals(False)
+        for control, value in ((self.onion_previous_input, self.canvas.onion_previous),
+                               (self.onion_next_input, self.canvas.onion_next)):
+            control.blockSignals(True)
+            control.setValue(value)
+            control.blockSignals(False)
         self.loop_checkbox.blockSignals(True)
         self.loop_checkbox.setChecked(getattr(self.canvas, 'loop_playback', True))
         self.loop_checkbox.blockSignals(False)
@@ -1928,10 +2041,10 @@ class MainWindow(QMainWindow):
 
     def refresh_title(self):
         if not self.project_active:
-            self.setWindowTitle('Linux Animation Studio v0.13 - No project open')
+            self.setWindowTitle('Linux Animation Studio v0.17 - No project open')
             return
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.13 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.17 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
@@ -2149,8 +2262,17 @@ class MainWindow(QMainWindow):
         self.status.setText(f'Canvas zoom: {self.canvas.zoom * 100:.0f}%')
 
     def fit_zoom(self):
-        if self.project_active:
-            self.canvas.set_zoom(1.0)
+        if not self.project_active:
+            return
+        area = self.canvas_scroll.viewport().size()
+        if area.width() <= 0 or area.height() <= 0:
+            return
+        factor = min((area.width() - 24) / self.canvas.width_px,
+                     (area.height() - 24) / self.canvas.height_px)
+        self.canvas.set_zoom(max(0.25, min(8.0, factor)))
+        self.canvas_scroll.horizontalScrollBar().setValue(0)
+        self.canvas_scroll.verticalScrollBar().setValue(0)
+        self.status.setText(f'Canvas fitted: {self.canvas.zoom * 100:.0f}%')
 
     def pick_color(self):
         color = QColorDialog.getColor(self.canvas.color, self, 'Choose brush color')
