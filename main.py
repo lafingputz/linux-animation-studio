@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.21.1: visible exposure grips and end navigation."""
+"""Linux Animation Studio v0.22: multi-frame editing and timeline interaction."""
 import io
 import wave
 import time
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
 )
 
-APP_VERSION = "0.21.1"
+APP_VERSION = "0.22.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -181,6 +181,8 @@ class Canvas(QWidget):
         self.hover_position = None
         self.hover_pressure = 1.0
         self._before_stroke = None
+        self._multi_stroke_before = None
+        self._multi_stroke_samples = []
         self._stroke_bounds = None
         self._stroke_layer_id = None
         self._undo = []
@@ -615,7 +617,32 @@ class Canvas(QWidget):
             if layer is not None:
                 before=session['source']
                 after=self._transformed_layer_image(session)
-                if before!=after:
+                multi = (getattr(self, 'multi_edit_enabled', False) and
+                         len(getattr(self, 'multi_edit_frames', [])) > 1 and layer.mode == 'animated')
+                if multi and before != after:
+                    snapshot_before = self._timeline_snapshot()
+                    seen = {(layer.id, layer.cel_id)}
+                    for index in sorted(set(self.multi_edit_frames)):
+                        if not 0 <= index < len(self.frames) or index == session['frame']:
+                            continue
+                        peer = next((x for x in self.frames[index] if x.id == layer.id), None)
+                        if peer is None or peer.mode != 'animated' or (peer.id, peer.cel_id) in seen:
+                            continue
+                        seen.add((peer.id, peer.cel_id))
+                        peer_session = dict(session)
+                        peer_session['source'] = peer.image.copy()
+                        transformed = self._transformed_layer_image(peer_session)
+                        for f in self.frames:
+                            for linked in f:
+                                if linked.id == peer.id and linked.cel_id == peer.cel_id:
+                                    linked.image = transformed
+                    for f in self.frames:
+                        for linked in f:
+                            if linked.id == layer.id and linked.cel_id == layer.cel_id:
+                                linked.image = after
+                    self._push(dict(type='timeline_snapshot', before=snapshot_before,
+                                    after=self._timeline_snapshot()))
+                elif before!=after:
                     for f in self.frames:
                         peer = next((x for x in f if x.id == layer.id and x.cel_id == layer.cel_id), None)
                         if peer is not None:
@@ -679,6 +706,12 @@ class Canvas(QWidget):
         self._stroke_layer_id = layer.id
         self._stroke_frame = self.frame_index
         self._before_stroke = layer.image.copy()
+        self._multi_stroke_samples = []
+        self._multi_stroke_before = None
+        if (getattr(self, 'multi_edit_enabled', False) and
+                layer.mode == 'animated' and
+                len(getattr(self, 'multi_edit_frames', [])) > 1):
+            self._multi_stroke_before = self._timeline_snapshot()
         self._stroke_bounds = QRectF()
         self._stamp_distance = 0.0
 
@@ -754,6 +787,8 @@ class Canvas(QWidget):
         if layer is None:
             return
         pressure = max(0.0, min(1.0, pressure))
+        if self._multi_stroke_before is not None and not getattr(self, '_replaying_multi_stroke', False):
+            self._multi_stroke_samples.append((QPointF(point), pressure, tablet))
         width = self.size * (0.15 + 0.85 * pressure) if tablet else self.size
         self._include_point(point, width)
         if self.last is not None:
@@ -812,7 +847,46 @@ class Canvas(QWidget):
         if not self.drawing:
             return
         layer = self.layer_by_id(self._stroke_layer_id)
-        if layer is not None and self._before_stroke is not None and not self._stroke_bounds.isNull():
+        if layer is not None and self._multi_stroke_before is not None:
+            before_snapshot = self._multi_stroke_before
+            samples = list(self._multi_stroke_samples)
+            seen = {(layer.id, layer.cel_id)}
+            original_id = self._stroke_layer_id
+            original_last = self.last
+            original_bounds = self._stroke_bounds
+            self._replaying_multi_stroke = True
+            try:
+                for index in sorted(set(getattr(self, 'multi_edit_frames', []))):
+                    if not 0 <= index < len(self.frames) or index == self._stroke_frame:
+                        continue
+                    target = next((item for item in self.frames[index] if item.id == original_id), None)
+                    if target is None or target.mode != 'animated' or not target.visible:
+                        continue
+                    key = (target.id, target.cel_id)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    self._stroke_layer_id = target.id
+                    # layer_by_id normally resolves the current frame, so replay against
+                    # the target via a temporary frame switch with no playhead signal.
+                    saved_layers = self.layers
+                    self.layers = self.frames[index]
+                    self.last = None
+                    self._stamp_distance = 0.0
+                    self._stroke_bounds = QRectF()
+                    try:
+                        for sample_point, sample_pressure, sample_tablet in samples:
+                            self.stroke(sample_point, sample_pressure, sample_tablet)
+                    finally:
+                        self.layers = saved_layers
+                after_snapshot = self._timeline_snapshot()
+                self._push(dict(type='timeline_snapshot', before=before_snapshot, after=after_snapshot))
+            finally:
+                self._replaying_multi_stroke = False
+                self._stroke_layer_id = original_id
+                self.last = original_last
+                self._stroke_bounds = original_bounds
+        elif layer is not None and self._before_stroke is not None and not self._stroke_bounds.isNull():
             rect = self._stroke_bounds.toAlignedRect().intersected(layer.image.rect())
             if not rect.isEmpty():
                 before = self._before_stroke.copy(rect)
@@ -1995,12 +2069,34 @@ class AudioWaveform(QWidget):
         self.position = 0
         self.setMinimumHeight(42)
         self.setMaximumHeight(58)
-        self.setToolTip('Click the waveform to seek to an animation frame')
+        self.setToolTip('Click or drag to scrub the playhead (audio seeking, not audible shuttle)')
+        self._scrubbing = False
         self.on_seek = None
 
-    def mousePressEvent(self, event):
-        if self.on_seek and event.button() == Qt.MouseButton.LeftButton:
+    def _seek_at(self, event):
+        if self.on_seek:
             self.on_seek(max(0., min(1., event.position().x() / max(1, self.width()))))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._scrubbing = True
+            self._seek_at(event)
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._scrubbing:
+            self._seek_at(event)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._scrubbing:
+            self._seek_at(event)
+            self._scrubbing = False
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -2030,6 +2126,7 @@ class ExposureFrameList(QListWidget):
         super().__init__(parent)
         self.on_exposure_drag = None
         self._drag_source = None
+        self._drag_target = None
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.setToolTip('Drag the turquoise grip at a frame’s right edge to extend its hold.')
@@ -2042,6 +2139,18 @@ class ExposureFrameList(QListWidget):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self.viewport())
+        if self._drag_source is not None and self._drag_target is not None:
+            first, last = self._drag_source, self._drag_target
+            if last > first:
+                for index in range(first + 1, min(last + 1, self.count())):
+                    preview_rect = self.visualItemRect(self.item(index))
+                    painter.fillRect(preview_rect, QColor(100, 196, 204, 95))
+                    painter.setPen(QPen(QColor('#15d4e6'), 2))
+                    painter.drawRect(preview_rect.adjusted(1, 1, -2, -2))
+            painter.setPen(QPen(QColor('#e9fdff'), 1))
+            painter.drawText(self.viewport().rect().adjusted(6, 3, -6, -3),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
+                f'Hold through frame {last + 1}' if last > first else 'Drag right to extend')
         for row in range(self.count()):
             item = self.item(row)
             rect = self.visualItemRect(item)
@@ -2059,6 +2168,8 @@ class ExposureFrameList(QListWidget):
 
     def mouseMoveEvent(self, event):
         if self._drag_source is not None:
+            hovered = self.itemAt(event.position().toPoint())
+            self._drag_target = self.row(hovered) if hovered is not None else None
             self.setCursor(Qt.CursorShape.SizeHorCursor)
             self.viewport().update()
             event.accept()
@@ -2076,6 +2187,7 @@ class ExposureFrameList(QListWidget):
             item = self.itemAt(event.position().toPoint())
             if item is not None and self._handle_rect(item).contains(event.position().toPoint()):
                 self._drag_source = self.row(item)
+                self._drag_target = self._drag_source
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
                 self.viewport().update()
                 event.accept()
@@ -2086,6 +2198,7 @@ class ExposureFrameList(QListWidget):
         if self._drag_source is not None:
             source = self._drag_source
             self._drag_source = None
+            self._drag_target = None
             self.unsetCursor()
             target = self.itemAt(event.position().toPoint())
             self.viewport().update()
@@ -2398,6 +2511,11 @@ class MainWindow(QMainWindow):
         self.batch_menu_button = QPushButton("Apply to Selected Frames…")
         self.batch_menu_button.clicked.connect(self.batch_frame_action)
         cel_page_layout.addWidget(self.batch_menu_button)
+        self.multi_edit_checkbox = QCheckBox('Multi-frame Edit: draw / erase / transform selected frames')
+        self.multi_edit_checkbox.setToolTip('Applies edits to unique cels on the active layer; linked exposures are edited once.')
+        self.multi_edit_checkbox.setChecked(False)
+        self.multi_edit_checkbox.toggled.connect(self._set_multi_edit)
+        cel_page_layout.addWidget(self.multi_edit_checkbox)
         self.track_visualization = QLabel('Cel tracks')
         self.track_visualization.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.track_visualization.setWordWrap(True)
@@ -2766,6 +2884,13 @@ class MainWindow(QMainWindow):
 
     def _timeline_selection_changed(self):
         self.timeline_selected_frames = sorted({i.row() for i in self.frame_list.selectedIndexes()})
+        self.canvas.multi_edit_frames = list(self.timeline_selected_frames)
+
+    def _set_multi_edit(self, checked):
+        self.canvas.multi_edit_enabled = bool(checked)
+        self.canvas.multi_edit_frames = list(self.timeline_selected_frames)
+        self.status.setText('Multi-frame editing enabled for selected frames.' if checked else
+                            'Multi-frame editing disabled.')
 
     def drag_exposure(self, start_index, end_index):
         if end_index <= start_index:
@@ -2956,6 +3081,7 @@ class MainWindow(QMainWindow):
 
     def refresh_frames(self):
         from PySide6.QtGui import QIcon, QPixmap
+        old_selected = list(getattr(self, 'timeline_selected_frames', []))
         self.frame_list.blockSignals(True)
         self.frame_list.clear()
         for index in range(len(self.canvas.frames)):
@@ -2963,6 +3089,12 @@ class MainWindow(QMainWindow):
                                    f'Frame {index + 1}')
             self.frame_list.addItem(item)
         self.frame_list.setCurrentRow(self.canvas.frame_index)
+        if getattr(self, 'multi_edit_checkbox', None) and self.multi_edit_checkbox.isChecked():
+            for selected_index in old_selected:
+                if 0 <= selected_index < self.frame_list.count():
+                    self.frame_list.item(selected_index).setSelected(True)
+            self.timeline_selected_frames = [i for i in old_selected if i < self.frame_list.count()]
+        self.canvas.multi_edit_frames = list(self.timeline_selected_frames)
         self.frame_list.blockSignals(False)
         self.frame_label.setText(f'Frame {self.canvas.frame_index + 1} / {len(self.canvas.frames)}')
         self.frame_jump.blockSignals(True)
