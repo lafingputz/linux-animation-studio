@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.23: desktop portability and editing-mode visibility."""
+"""Linux Animation Studio v0.24: compact contextual drawing interface."""
 import io
 import wave
 import time
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
 )
 
-APP_VERSION = "0.23.0"
+APP_VERSION = "0.24.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2286,20 +2286,46 @@ class MainWindow(QMainWindow):
             self.toolbar_buttons.append(item)
             return item
 
-        self.color_button = button('Color', self.pick_color)
-        self.update_color_swatch()
-        self.undo_button = button('Undo', self.canvas.undo)
-        self.redo_button = button('Redo', self.canvas.redo)
+        # The main menu bar keeps the full file/export commands. The drawing
+        # toolbar exposes only everyday actions and context-sensitive tools.
+        button('New', self.new_project).setToolTip('New project')
+        button('Open .las', self.open_project).setToolTip('Open project')
+        self.undo_button = button('↶', self.canvas.undo)
+        self.undo_button.setToolTip('Undo')
+        self.redo_button = button('↷', self.canvas.redo)
+        self.redo_button.setToolTip('Redo')
         self.undo_button.setEnabled(False)
         self.redo_button.setEnabled(False)
         self.canvas.history_changed.connect(self.update_history)
-        button('Clear Layer', self.canvas.clear)
-        button('Deselect', self.canvas.deselect)
-        button('New', self.new_project)
-        button('Open .las', self.open_project)
-        button('Close', self.close_project)
-        button('Save .las', self.save_project)
-        button('Export PNG', self.export_png)
+        toolbar.addSpacing(12)
+        self.tool_buttons = {}
+        for tool, label, hint in [
+            ('brush', '🖌', 'Brush: click to draw, arrow for brush presets'),
+            ('eraser', '⌫', 'Eraser: click to erase, arrow for size presets'),
+            ('select', '▱', 'Selection: arrow for rectangle / lassos'),
+            ('move', '✥', 'Move selected pixels'),
+            ('transform', '➤', 'Transform selection or active cel'),
+            ('pan', '✋', 'Pan canvas')]:
+            b = QToolButton()
+            b.setText(label)
+            b.setToolTip(hint)
+            b.setCheckable(True)
+            b.setMinimumSize(37, 36)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            b.clicked.connect(lambda checked=False, t=tool: self.set_tool(t))
+            toolbar.addWidget(b)
+            self.tool_buttons[tool] = b
+        self.tool_buttons['brush'].setChecked(True)
+        toolbar.addSpacing(8)
+        self.color_button = button('●', self.pick_color)
+        self.color_button.setToolTip('Choose drawing color')
+        self.color_button.setFixedSize(39, 36)
+        self.update_color_swatch()
+        toolbar.addStretch()
+        self.options_button = button('⚙ Tools', self.toggle_tool_options)
+        self.options_button.setToolTip('Show/hide advanced brush and tool settings')
+        self.layers_button = button('▤ Layers', self.toggle_layers_panel)
+        self.layers_button.setToolTip('Show/hide layer controls')
         self.top_toolbar = QWidget()
         self.top_toolbar.setLayout(toolbar)
         vertical.addWidget(self.top_toolbar)
@@ -2309,15 +2335,6 @@ class MainWindow(QMainWindow):
         left = QVBoxLayout(left_panel)
         left.setContentsMargins(5, 5, 5, 5)
         left.addWidget(QLabel('TOOLS'))
-        self.tool_buttons = {}
-        for tool, text in [('brush','Brush'), ('eraser','Eraser'),
-                           ('select','Selection'), ('move','Move Pixels'), ('transform','Transform'), ('pan','Pan Canvas')]:
-            b = QPushButton(text)
-            b.setCheckable(True)
-            b.setMinimumWidth(130)
-            b.clicked.connect(lambda checked, t=tool: self.set_tool(t))
-            self.tool_buttons[tool] = b
-            left.addWidget(b)
         self.selection_mode_picker = QComboBox()
         self.selection_mode_picker.addItem('Rectangle', 'rectangle')
         self.selection_mode_picker.addItem('Freehand Lasso', 'freehand')
@@ -2326,7 +2343,6 @@ class MainWindow(QMainWindow):
             lambda i: self.canvas.set_selection_mode(self.selection_mode_picker.itemData(i)))
         left.addWidget(QLabel('Selection mode'))
         left.addWidget(self.selection_mode_picker)
-        self.tool_buttons['brush'].setChecked(True)
         transform_buttons = QHBoxLayout()
         apply_button = QPushButton('Apply Transform')
         apply_button.clicked.connect(self.canvas.apply_transform)
@@ -2412,6 +2428,7 @@ class MainWindow(QMainWindow):
         settings_scroll.setWidget(left_panel)
         self.settings_scroll = settings_scroll
         content.addWidget(settings_scroll)
+        settings_scroll.hide()  # Canvas first; ⚙ Tools reveals advanced settings.
 
         scroll = PannableScrollArea()
         self.canvas_scroll = scroll
@@ -2452,6 +2469,7 @@ class MainWindow(QMainWindow):
         self.right_panel = QWidget()
         self.right_panel.setLayout(right)
         content.addWidget(self.right_panel)
+        self.right_panel.hide()  # Open layers from the compact toolbar.
         self.workspace = QWidget()
         self.workspace.setLayout(content)
         vertical.addWidget(self.workspace, 1)
@@ -2670,6 +2688,7 @@ class MainWindow(QMainWindow):
         vertical.addWidget(self.timeline_container, 0)
         vertical.addWidget(self.status)
         self.setCentralWidget(root)
+        self._build_tool_menus()
         self.refresh_layers()
         self.refresh_frames()
         self.refresh_title()
@@ -2844,6 +2863,69 @@ class MainWindow(QMainWindow):
             for name, button in self.tool_buttons.items():
                 button.setChecked(name == 'transform')
             self.return_canvas_focus()
+
+    def toggle_tool_options(self):
+        if not self.project_active:
+            return
+        self.settings_scroll.setVisible(not self.settings_scroll.isVisible())
+        self.return_canvas_focus()
+
+    def toggle_layers_panel(self):
+        if not self.project_active:
+            return
+        self.right_panel.setVisible(not self.right_panel.isVisible())
+        self.return_canvas_focus()
+
+    def _build_tool_menus(self):
+        """Quick sub-tools. The original controls remain in ⚙ Tools."""
+        brush_menu = QMenu(self)
+        for preset, preview in [('Round', '━━━'), ('Pencil', '┄┄┄'),
+                                ('Ink', '━━━━'), ('Airbrush', '·····')]:
+            action = brush_menu.addAction(f'{preview}   {preset}')
+            action.triggered.connect(lambda checked=False, p=preset: self._quick_brush(p))
+        brush_menu.addSeparator()
+        action = brush_menu.addAction('More brush settings…')
+        action.triggered.connect(lambda: self.settings_scroll.show())
+        brush_button = self.tool_buttons['brush']
+        brush_button.setMenu(brush_menu)
+        brush_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+
+        eraser_menu = QMenu(self)
+        for name, size in [('Small eraser', 15), ('Medium eraser', 45),
+                           ('Large eraser', 95), ('Extra large eraser', 175)]:
+            action = eraser_menu.addAction(f'{name} ({size} px)')
+            action.triggered.connect(lambda checked=False, n=size: self._quick_eraser(n))
+        eraser_menu.addSeparator()
+        action = eraser_menu.addAction('More eraser settings…')
+        action.triggered.connect(lambda: self.settings_scroll.show())
+        eraser_button = self.tool_buttons['eraser']
+        eraser_button.setMenu(eraser_menu)
+        eraser_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+
+        selection_menu = QMenu(self)
+        for name, mode in [('Rectangle', 'rectangle'), ('Freehand Lasso', 'freehand'),
+                           ('Polygonal Lasso', 'polygonal')]:
+            action = selection_menu.addAction(name)
+            action.triggered.connect(lambda checked=False, m=mode: self._quick_selection(m))
+        select_button = self.tool_buttons['select']
+        select_button.setMenu(selection_menu)
+        select_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+
+    def _quick_brush(self, preset):
+        self.set_tool('brush')
+        self.brush_select.setCurrentText(preset)
+        self.return_canvas_focus()
+
+    def _quick_eraser(self, size):
+        self.set_tool('eraser')
+        self.size_input.setValue(size)
+        self.return_canvas_focus()
+
+    def _quick_selection(self, mode):
+        self.selection_mode_picker.setCurrentIndex(
+            self.selection_mode_picker.findData(mode))
+        self.set_tool('select')
+        self.return_canvas_focus()
 
     def set_tool(self, tool):
         old_tool = self.canvas.tool
@@ -3387,9 +3469,11 @@ class MainWindow(QMainWindow):
 
     def update_color_swatch(self):
         color = self.canvas.color
-        ink = '#ffffff' if color.lightness() < 130 else '#111111'
-        self.color_button.setText('Color  ' + color.name().upper())
-        self.color_button.setStyleSheet(f'QPushButton {{ background-color: {color.name()}; color: {ink}; border: 1px solid #888; padding: 5px; }}')
+        self.color_button.setText('●')
+        self.color_button.setToolTip(f'Color: {color.name().upper()} (click to change)')
+        self.color_button.setStyleSheet(
+            f'QPushButton {{ color: {color.name()}; font-size: 27px; '
+            'border: 1px solid palette(mid); border-radius: 18px; padding: 0px; }}')
 
     def adjust_zoom(self, factor):
         if not self.project_active:

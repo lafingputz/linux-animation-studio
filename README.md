@@ -1,13 +1,31 @@
-# Linux Animation Studio v0.23.0
+# Linux Animation Studio v0.24.0
 
-Cross-platform preparation release based on the validated v0.22.0 branch.
+First compact-interface release, built directly on the cross-platform v0.23.0 baseline.
 
-## What's new
+## What's new in v0.24.0
 
-- **Cross-platform brush data directory.** Linux intentionally retains the existing `$XDG_DATA_HOME/linux-animation-studio/brushes` (or `~/.local/share/linux-animation-studio/brushes`) directory. Windows and macOS use Qt's standard per-user application-data folder. This does not move or delete existing Linux brushes.
-- **FFmpeg discovery.** WAV/MP3 waveform decoding and MP4 export locate FFmpeg using `LAS_FFMPEG_PATH`, an executable alongside the Python/packaged app, or system `PATH`. An error message no longer assumes Ubuntu or apt.
-- **Multi-frame Edit warning.** The transport row displays an orange `MULTI-FRAME EDIT ON (N selected)` label whenever batch editing is enabled, even while the Cels tab is hidden.
-- **Application version:** v0.23.0. `.las` file format **remains v6**, and the documented launch method is unchanged.
+- **Canvas-first workspace:** Advanced tool settings and layer management begin collapsed, maximizing drawing room on small displays. Click **⚙ Tools** or **▤ Layers** to show/hide the existing panels. This is intentional: all controls from v0.23 remain available.
+- **Compact tool strip:** Brush, Eraser, Selection, Move, Transform, and Pan have concise toolbar buttons with tooltips; selected tool remains visibly checked. Use the small dropdown arrow attached to Brush, Eraser, or Selection for submenus.
+- **Quick brush library:** Built-in Round, Pencil, Ink, and Airbrush presets are available from the Brush dropdown with lightweight text-based stroke samples. The full custom brush library, pressure dynamics, stamps, and detailed settings remain in **⚙ Tools**; full graphical previews are planned for the next UI milestone.
+- **Eraser presets:** Four quick eraser sizes, retaining independent brush/eraser sizing. The detailed settings panel remains available.
+- **Selection submenu:** Rectangle, Freehand Lasso, and Polygonal Lasso are available directly from a dropdown; advanced selection-related operations stay accessible.
+- **Simple color swatch:** One colored circle opens Qt's existing color picker. The disc/harmony/palette manager is planned for a subsequent release.
+- **Existing File menu and animation timeline remain available**; Undo and Redo are now compact toolbar icons. This release deliberately does not replace the timeline or transform engine.
+- **No drawing engine or project format rewrite.** Keep v0.23 portability, multi-frame edit warning, WAV/MP3 playback, exposure holds, and MP4 exporting. `.las` format remains version 6.
+
+## UI notes
+
+The tool buttons show a split arrow for the Brush, Eraser, and Selection submenus. Click the main portion to activate the last selected subtool; click the arrow to choose a preset or selection type. Use **⚙ Tools** for custom brush creation, tuning, transform apply/cancel, and other advanced controls. Use **▤ Layers** to show layer management. The application menu bar continues to provide File, Edit, and other functions. Tab remains Canvas Focus Mode.
+
+## Recommended v0.24 checks
+
+1. Start LAS on your Surface Pro 3, Windows Cintiq, and macOS; confirm the sidebar panels begin collapsed, and the drawing canvas has more space.
+2. Switch between Brush and Eraser; verify independent sizes and pressure behavior. Choose presets from dropdown arrows.
+3. Select Rectangle, Freehand Lasso, and Polygonal Lasso from the Selection dropdown; test drawing within each mask.
+4. Test Transform, Apply, and Cancel (the last two remain in **⚙ Tools**), Move, Pan, undo/redo, and keyboard shortcuts.
+5. Open and close **⚙ Tools** and **▤ Layers**; exercise custom brush controls and layer behavior.
+6. Change the color via the swatch, save/reopen a `.las` project, then export PNG/MP4 with audio.
+7. Verify animation, exposure holds, linked cels, multi-frame editing, waveform dragging, and Focus Mode did not regress.
 
 ## Run from source (Linux, Windows or macOS)
 
