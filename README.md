@@ -1,40 +1,43 @@
-# Linux Animation Studio v0.18 — Lasso Selection Test Build
+# Linux Animation Studio v0.19 — Timeline Cels & Exposure Test Build
 
-This update builds directly from the tested v0.17.6 navigation release. It adds three modes under the existing **Selection** tool: Rectangle, Freehand Lasso, and Polygonal Lasso. Selection boundaries use an antialiased document-size ARGB mask and a QPainterPath; a bounding box is retained for move and transform handles.
+This source is based on **v0.18**. It retains the existing lasso modes, Wacom navigation controller, custom brushes, layers, transforms, motion objects, onion skins, and export tools.
 
-## Controls
+## New timeline controls
 
-- **Rectangle**: press, drag, release.
-- **Freehand Lasso**: drag to trace, then lift pen to close. The closing segment is drawn from pen-up to the first point.
-- **Polygonal Lasso**: press/tap to set vertices. Finish by double-clicking/double-tapping, tapping near the first point (three or more points), or pressing Enter. Backspace removes a vertex, Escape cancels an unfinished polygon.
-- **Ctrl+D**: deselect. **Ctrl+A**: select all.
-- Choose **Move Pixels** or **Transform** to edit a selected region. **Brush from Selection** respects the mask.
-- The dedicated **Pan Canvas** tool and **Space + Wacom drag** remain available.
+- **Extend Hold**: with an *animated* layer active, enter the desired total number of exposure frames (including the current frame) and click Extend Hold. Existing blank frames are linked to the active cel; extra frames are appended up to the 120-frame limit. **The operation refuses to overwrite an independent nonempty cel.**
+- **Break / New Cel**: on the current frame, duplicate the pixels into an independent cel and break the link to previous exposures. This is useful when changing a pose or expression.
+- **Link From…**: on the current frame, enter any source frame number on the same layer. Reuses the editable source cel in the current frame. **This replaces the current frame's cel**, so save your work or choose an empty frame first.
+- **Unlink**: detach the currently linked cel while retaining its pixels.
+- **Go to**: jump directly to a numbered frame.
+- **Track strip**: ◆ first/key cel, ━ adjacent hold, ↗ noncontiguous link, · empty cel, ═ static layer. Brackets identify the active frame. The original frame thumbnail strip remains.
 
-## Important notes
+The frame insertion, duplication and deletion controls remain. Undo and redo cover hold, break, link and unlink. Cels share one editable `QImage` instance in memory. Changing any linked instance updates its peers.
 
-- Selections are in-memory editing state and are not persisted in `.las` files; all raster edits made with them are saved normally.
-- Existing `.las` v4 project files and the persisted custom brush library remain unchanged.
-- Polygonal double-tap is supported with a short tap window, but the platform may also deliver an ordinary Qt double-click.
-- Antialiased path clipping is supplied through Qt's painter; inspect stroke and eraser edges closely on the Surface.
-- This is a **test build**. Python syntax compilation has passed; graphical application behavior, Wacom tablet behavior on Wayland, selection blending, and exporting must be verified on hardware.
+## Project format and backwards compatibility
 
-## Acceptance tests
+- `.las` project **version 5** adds a `cel_id` per saved frame/layer entry. Existing `.las` versions **1, 2, 3, and 4** are still loadable as independent animated cels, and can then be saved in v5 format.
+- Shared identities are reconstructed when opening v5 projects; the archive still saves frame-specific PNG assets for easy interoperability.
+- **Back up your original `.las` files** before resaving them, since an older application may not support v5 projects.
+- Selections remain temporary editor state, as in v0.18.
 
-1. Rectangle selection: drag, paint, erase, move, and transform as before.
-2. Freehand selection: trace a complex curve using Wacom; lift pen and inspect the closure.
-3. Polygonal selection: test double-tap, closing near the start, Enter, Backspace, and Escape.
-4. Paint and erase both near the edges and outside an irregular selected area.
-5. Move only selected pixels, retaining the source artwork outside the selection.
-6. Scale and rotate irregular selections. Verify no rectangular pixels are included.
-7. Create both full-color and tintable brushes from lasso artwork.
-8. Verify selections under Ctrl+0, zoom, panning, and Wacom hover alignment.
-9. Regression: timeline, onion skins, layers, `.las` save/reopen, animation playback, PNG and MP4 exports, custom-brush dynamics, undo/redo.
-10. Navigation regression: uninterrupted Space + Wacom dragging and dedicated Pan Canvas tool.
+## Acceptance tests on Surface Pro 3
 
-## Install using GitHub
+1. Draw on an animated layer, add blank frames, and extend a hold. Draw/edit a held frame and verify linked exposure frames update.
+2. Try extending a hold into an occupied independent frame. It must refuse without erasing artwork.
+3. Break a held cel, edit it, and verify earlier exposures are unaffected.
+4. Link a cel from an earlier frame to a later noncontiguous frame, then draw in either and verify shared edits.
+5. Unlink and verify subsequent edits are independent.
+6. Verify the track strip represents key cels, holds, noncontiguous links, empty cels, and static layers.
+7. Insert, duplicate, delete, jump between frames, and undo/redo timeline edits.
+8. Verify onion skins, playback, PNG sequence, and MP4 export reproduce the expected exposure frames.
+9. Open an old v4 `.las` project, verify existing independent cels are preserved, then save/reopen as v5.
+10. Regression: Wacom Space+drag and Pan Canvas, three lasso modes, brush dynamics, transformations, timeline visibility, and custom brushes.
 
-Copy **main.py**, **README.md**, **requirements.txt** and **.gitignore** into your existing repository on the Mac, then run on your Surface:
+**Build verification:** Python syntax and ZIP contents can be checked without PySide6. Live Qt and Wacom behavior need acceptance testing on the Surface. This is a test build, not a certified stable release.
+
+## Installation through GitHub
+
+Copy `main.py`, `README.md`, `requirements.txt`, and `.gitignore` into your existing repository using your Mac. Commit the changes; on the Surface:
 
 ```bash
 cd ~/Projects/linux-animation-studio

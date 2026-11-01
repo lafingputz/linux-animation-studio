@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.18: selection masks and lasso modes."""
+"""Linux Animation Studio v0.19: exposure holds and linked cels."""
 import io
 import time
 import os
@@ -11,7 +11,7 @@ import json
 import sys
 import uuid
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from bisect import bisect_left
 from pathlib import Path
 
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
-PROJECT_VERSION = 4
+PROJECT_VERSION = 5
 MAX_STEPS = 50
 MAX_HISTORY_BYTES = 96 * 1024 * 1024
 
@@ -101,6 +101,7 @@ class Layer:
     visible: bool = True
     opacity: int = 100
     mode: str = "animated"  # animated cels or one shared static image
+    cel_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 @dataclass
@@ -284,6 +285,7 @@ class Canvas(QWidget):
         obj = MotionObject(uuid.uuid4().hex, layer.name + ' (motion)', layer.image.copy(),
                            {self.frame_index: (0.0, 0.0, 100.0, 0.0)})
         layer.image = transparent_image(self.width_px, self.height_px)
+        layer.cel_id = uuid.uuid4().hex
         self.motion_objects.append(obj)
         self.active_motion_id = obj.id
         self._undo.clear()
@@ -611,7 +613,10 @@ class Canvas(QWidget):
                 before=session['source']
                 after=self._transformed_layer_image(session)
                 if before!=after:
-                    layer.image=after
+                    for f in self.frames:
+                        peer = next((x for x in f if x.id == layer.id and x.cel_id == layer.cel_id), None)
+                        if peer is not None:
+                            peer.image = after
                     self._push(dict(type='patch',id=layer.id,frame=session['frame'],rect=after.rect(),before=before,after=after.copy()))
         else:
             obj=self.active_motion()
@@ -863,6 +868,8 @@ class Canvas(QWidget):
                 else:
                     obj.keys[cmd['frame']] = tuple(value)
                 self.motion_changed.emit()
+        elif typ == 'timeline_snapshot':
+            self._restore_timeline_snapshot(cmd['after'] if forward else cmd['before'])
         elif typ in ('frame_add', 'frame_delete'):
             # Retain the exact removed/inserted cel objects, including static-layer
             # sharing. A command stores before/after key maps for every motion object.
@@ -1209,7 +1216,10 @@ class Canvas(QWidget):
         after = transparent_image(self.width_px, self.height_px)
         if before == after:
             return
-        layer.image = after
+        for frame in self.frames:
+            for peer in frame:
+                if peer.id == layer.id and peer.cel_id == layer.cel_id:
+                    peer.image = after
         self._push(dict(type='patch', id=layer.id, rect=layer.image.rect(), before=before, after=after.copy()))
         self.update()
         self.frames_changed.emit()
@@ -1290,7 +1300,7 @@ class Canvas(QWidget):
     def _copy_layers(self, layers, duplicate=True):
         return [Layer(x.id, x.name,
                       x.image if x.mode == 'static' else (x.image.copy() if duplicate else transparent_image(self.width_px, self.height_px)),
-                      x.visible, x.opacity, x.mode) for x in layers]
+                      x.visible, x.opacity, x.mode, x.cel_id if x.mode == 'static' else uuid.uuid4().hex) for x in layers]
 
     def set_layer_mode(self, mode):
         """Switch the active track between shared static art and independent cels."""
@@ -1302,10 +1312,12 @@ class Canvas(QWidget):
         # Static -> animated keeps the visible art in each cel and detaches it.
         # Animated -> static deliberately chooses the *current* cel for all frames.
         shared = target.image.copy()
+        shared_id = uuid.uuid4().hex
         for frame in self.frames:
             layer = next(x for x in frame if x.id == target.id)
             layer.mode = mode
             layer.image = shared if mode == 'static' else shared.copy() if frame is self.frames[self.frame_index] else layer.image.copy()
+            layer.cel_id = shared_id if mode == 'static' else uuid.uuid4().hex
         self._undo.clear()
         self._redo.clear()
         self.history_changed.emit(False, False)
@@ -1321,10 +1333,137 @@ class Canvas(QWidget):
                 old = previous.get(track.id)
                 image = (track.image if track.mode == 'static' else
                          old.image if old is not None else transparent_image(self.width_px, self.height_px))
-                result.append(Layer(track.id, track.name, image, track.visible, track.opacity, track.mode))
+                result.append(Layer(track.id, track.name, image, track.visible, track.opacity, track.mode, old.cel_id if old is not None else uuid.uuid4().hex))
             frame[:] = result
         self.layers = self.frames[self.frame_index]
 
+
+    def _timeline_snapshot(self):
+        """Copy frame data, preserving shared-image identity within each cel group."""
+        image_cache = {}
+        snapshot = []
+        for frame_layers in self.frames:
+            row = []
+            for layer in frame_layers:
+                key = (layer.id, layer.cel_id) if layer.mode != 'static' else (layer.id, 'static')
+                if key not in image_cache:
+                    image_cache[key] = layer.image.copy()
+                row.append(Layer(layer.id, layer.name, image_cache[key], layer.visible,
+                                 layer.opacity, layer.mode, layer.cel_id))
+            snapshot.append(row)
+        return snapshot
+
+    def _restore_timeline_snapshot(self, snapshot):
+        self.frames = self._clone_snapshot(snapshot)
+        self.frame_index = min(self.frame_index, len(self.frames) - 1)
+        self.layers = self.frames[self.frame_index]
+        self.deselect()
+
+    def _clone_snapshot(self, snapshot):
+        cache = {}
+        result = []
+        for frame_layers in snapshot:
+            row = []
+            for layer in frame_layers:
+                key = (layer.id, layer.cel_id) if layer.mode != 'static' else (layer.id, 'static')
+                if key not in cache:
+                    cache[key] = layer.image.copy()
+                row.append(Layer(layer.id, layer.name, cache[key], layer.visible,
+                                 layer.opacity, layer.mode, layer.cel_id))
+            result.append(row)
+        return result
+
+    def _edit_timeline(self, operation):
+        if self.playing or self.drawing or self.transform_session is not None:
+            return False
+        before = self._timeline_snapshot()
+        try:
+            result = operation()
+        except Exception:
+            self._restore_timeline_snapshot(before)
+            raise
+        if result is False:
+            return False
+        self.layers = self.frames[self.frame_index]
+        after = self._timeline_snapshot()
+        self._push(dict(type='timeline_snapshot', before=before, after=after))
+        self.document_changed.emit()
+        return True
+
+    def hold_cel(self, duration):
+        """Extend current cel into subsequent blank frames, without overwriting art."""
+        duration = max(1, int(duration))
+        source_index = self.frame_index
+        source = self.active_layer()
+        if source is None or source.mode != 'animated':
+            return False
+        target_end = min(120, source_index + duration)
+        # Never silently destroy independent artwork.
+        for index in range(source_index + 1, min(target_end, len(self.frames))):
+            target = next(x for x in self.frames[index] if x.id == source.id)
+            if target.cel_id != source.cel_id and not target.image.isNull() and self._has_pixels(target.image):
+                return False
+        def operation():
+            while len(self.frames) < target_end:
+                self.frames.append(self._copy_layers(self.frames[-1], duplicate=False))
+            for index in range(source_index + 1, target_end):
+                target = next(x for x in self.frames[index] if x.id == source.id)
+                target.image = source.image
+                target.cel_id = source.cel_id
+        return self._edit_timeline(operation)
+
+    @staticmethod
+    def _has_pixels(image):
+        """Quick alpha test, including fully transparent black images."""
+        alpha = image.convertToFormat(QImage.Format.Format_Alpha8)
+        data = bytes(alpha.constBits())
+        return data.count(0) != len(data)
+
+    def link_cel(self, source_index):
+        """Reuse a cel at current playhead, keeping its source alive elsewhere."""
+        target = self.active_layer()
+        if target is None or target.mode != 'animated' or not 0 <= source_index < len(self.frames):
+            return False
+        source = next(x for x in self.frames[source_index] if x.id == target.id)
+        if target.cel_id == source.cel_id:
+            return False
+        def operation():
+            target.image = source.image
+            target.cel_id = source.cel_id
+        return self._edit_timeline(operation)
+
+    def unlink_cel(self):
+        target = self.active_layer()
+        if target is None or target.mode != 'animated':
+            return False
+        if sum(1 for f in self.frames for x in f if x.id == target.id and x.cel_id == target.cel_id) < 2:
+            return False
+        def operation():
+            target.image = target.image.copy()
+            target.cel_id = uuid.uuid4().hex
+        return self._edit_timeline(operation)
+
+    def split_hold(self):
+        """Make the current exposure independent (a new editable key cel)."""
+        target = self.active_layer()
+        if target is None or target.mode != 'animated':
+            return False
+        def operation():
+            target.image = target.image.copy()
+            target.cel_id = uuid.uuid4().hex
+        return self._edit_timeline(operation)
+
+    def cel_kind(self, layer_id, index):
+        layer = next((x for x in self.frames[index] if x.id == layer_id), None)
+        if layer is None:
+            return 'empty'
+        if layer.mode == 'static':
+            return 'static'
+        peers = [j for j, f in enumerate(self.frames)
+                 if next(x for x in f if x.id == layer_id).cel_id == layer.cel_id]
+        if peers and peers[0] != index:
+            return 'hold' if index - 1 in peers else 'link'
+        return 'key' if self._has_pixels(layer.image) else 'empty'
 
     def _finish_frame_change(self, mark_dirty=True):
         self.deselect()
@@ -1461,7 +1600,7 @@ class Canvas(QWidget):
                     for layer in layers:
                         filename = f'frames/{index}/{layer.id}.png'
                         records.append(dict(id=layer.id, name=layer.name, visible=layer.visible,
-                                            opacity=layer.opacity, mode=layer.mode, file=filename))
+                                            opacity=layer.opacity, mode=layer.mode, cel_id=layer.cel_id, file=filename))
                         archive.writestr(filename, png_bytes(layer.image))
                     manifest['frames'].append(dict(layers=records))
                 for obj in self.motion_objects:
@@ -1485,7 +1624,7 @@ class Canvas(QWidget):
         with zipfile.ZipFile(path, 'r') as archive:
             info = json.loads(archive.read('manifest.json'))
             version = info.get('version')
-            if info.get('format') != 'linux-animation-studio' or version not in (1, 2, 3, 4):
+            if info.get('format') != 'linux-animation-studio' or version not in (1, 2, 3, 4, 5):
                 raise ValueError('Unsupported .las project format/version')
             width, height = int(info['width']), int(info['height'])
             if not (1 <= width <= 8192 and 1 <= height <= 8192):
@@ -1514,7 +1653,8 @@ class Canvas(QWidget):
                     if not 0 <= opacity <= 100:
                         raise ValueError('Invalid layer opacity')
                     layers.append(Layer(lid, str(entry['name']), image,
-                                        bool(entry['visible']), opacity, entry.get('mode', 'animated') if version >= 4 else 'animated'))
+                                        bool(entry['visible']), opacity, entry.get('mode', 'animated') if version >= 4 else 'animated',
+                                        entry.get('cel_id', uuid.uuid4().hex) if version >= 5 else uuid.uuid4().hex))
                 frames.append(layers)
             # Older projects can contain independently created layers per frame.
             # Promote every unique ID to its own persistent track, preserving art.
@@ -1533,13 +1673,25 @@ class Canvas(QWidget):
                 lookup = {layer.id: layer for layer in frame}
                 aligned.append([Layer(template.id, template.name,
                     lookup[template.id].image if template.id in lookup else transparent_image(width, height),
-                    template.visible, template.opacity, template.mode) for template in definitions])
+                    template.visible, template.opacity, template.mode,
+                    lookup[template.id].cel_id if template.id in lookup else uuid.uuid4().hex) for template in definitions])
             frames = aligned
             for track_index, template in enumerate(definitions):
                 if template.mode == 'static':
                     shared = frames[0][track_index].image
                     for frame in frames:
                         frame[track_index].image = shared
+            if version >= 5:
+                shared_cels = {}
+                for row in frames:
+                    for layer in row:
+                        if not isinstance(layer.cel_id, str) or len(layer.cel_id) != 32 or not all(c in '0123456789abcdef' for c in layer.cel_id):
+                            raise ValueError('Invalid cel identifier')
+                        key = (layer.id, layer.cel_id)
+                        if key in shared_cels:
+                            layer.image = shared_cels[key]
+                        else:
+                            shared_cels[key] = layer.image
             index = int(info.get('active_frame', 0)) if version >= 2 else 0
             if not 0 <= index < len(frames):
                 raise ValueError('Invalid active frame')
@@ -2021,8 +2173,32 @@ class MainWindow(QMainWindow):
         frame_controls.addWidget(self.fps_input)
         self.frame_label = QLabel('Frame 1 / 1')
         frame_controls.addWidget(self.frame_label)
+        frame_controls.addWidget(QLabel('Go to:'))
+        self.frame_jump = QSpinBox()
+        self.frame_jump.setRange(1, 120)
+        self.frame_jump.valueChanged.connect(lambda n: self.canvas.change_frame(n - 1))
+        frame_controls.addWidget(self.frame_jump)
         frame_controls.addStretch()
         timeline.addLayout(frame_controls)
+        cel_controls = QHBoxLayout()
+        cel_controls.addWidget(QLabel('Active layer cel:'))
+        self.hold_length = QSpinBox()
+        self.hold_length.setRange(2, 120)
+        self.hold_length.setValue(3)
+        self.hold_length.setToolTip('Total exposure duration, including current frame')
+        cel_controls.addWidget(self.hold_length)
+        for title, callback in [('Extend Hold', self.extend_hold),
+                                ('Break / New Cel', self.split_hold),
+                                ('Link From…', self.link_from),
+                                ('Unlink', self.unlink_current)]:
+            button = QPushButton(title)
+            button.clicked.connect(callback)
+            cel_controls.addWidget(button)
+        timeline.addLayout(cel_controls)
+        self.track_visualization = QLabel('Cel tracks')
+        self.track_visualization.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.track_visualization.setWordWrap(True)
+        timeline.addWidget(self.track_visualization)
         play_controls = QHBoxLayout()
         self.play_button = QPushButton('▶ Play')
         self.play_button.clicked.connect(self.toggle_playback)
@@ -2295,12 +2471,48 @@ class MainWindow(QMainWindow):
         self.canvas.update()
 
 
+    def extend_hold(self):
+        if not self.canvas.hold_cel(self.hold_length.value()):
+            QMessageBox.information(self, 'Exposure hold',
+                'Cannot extend: the active track is static, playback is running, or a target frame contains independent artwork. Existing drawings are never overwritten.')
+
+    def split_hold(self):
+        if not self.canvas.split_hold():
+            QMessageBox.information(self, 'New cel', 'Choose an animated layer and stop playback first.')
+
+    def link_from(self):
+        frame, ok = QInputDialog.getInt(self, 'Link cel from frame',
+            'Source frame number:', max(1, self.canvas.frame_index), 1, len(self.canvas.frames))
+        if ok and not self.canvas.link_cel(frame - 1):
+            QMessageBox.information(self, 'Link cel', 'Could not link: select an animated track and a different source cel.')
+
+    def unlink_current(self):
+        if not self.canvas.unlink_cel():
+            QMessageBox.information(self, 'Unlink cel', 'This cel is not linked to another frame, or playback is running.')
+
+    def refresh_track_visualization(self):
+        symbols = {'key':'◆', 'hold':'━', 'link':'↗', 'empty':'·', 'static':'═'}
+        rows = []
+        for track in self.canvas.layers:
+            cells = []
+            for index in range(len(self.canvas.frames)):
+                kind = self.canvas.cel_kind(track.id, index)
+                label = symbols[kind]
+                cells.append(f'[{label}]' if index == self.canvas.frame_index else f' {label} ')
+            rows.append(f'{track.name[:17]}: ' + ''.join(cells))
+        self.track_visualization.setText('   '.join(rows) + '\n◆ key   ━ held   ↗ linked   · empty   ═ static   [ ] playhead')
+
     def refresh_playhead(self, index):
         self.frame_list.blockSignals(True)
         self.frame_list.setCurrentRow(index)
         self.frame_list.blockSignals(False)
         self.frame_label.setText(f'Frame {index + 1} / {len(self.canvas.frames)}')
+        self.frame_jump.blockSignals(True)
+        self.frame_jump.setRange(1, len(self.canvas.frames))
+        self.frame_jump.setValue(index + 1)
+        self.frame_jump.blockSignals(False)
         self.refresh_motion()
+        self.refresh_track_visualization()
 
     def refresh_frames(self):
         from PySide6.QtGui import QIcon, QPixmap
@@ -2313,6 +2525,10 @@ class MainWindow(QMainWindow):
         self.frame_list.setCurrentRow(self.canvas.frame_index)
         self.frame_list.blockSignals(False)
         self.frame_label.setText(f'Frame {self.canvas.frame_index + 1} / {len(self.canvas.frames)}')
+        self.frame_jump.blockSignals(True)
+        self.frame_jump.setRange(1, len(self.canvas.frames))
+        self.frame_jump.setValue(self.canvas.frame_index + 1)
+        self.frame_jump.blockSignals(False)
         self.fps_input.blockSignals(True)
         self.fps_input.setValue(self.canvas.fps)
         self.fps_input.blockSignals(False)
@@ -2331,13 +2547,14 @@ class MainWindow(QMainWindow):
         self.loop_checkbox.setChecked(getattr(self.canvas, 'loop_playback', True))
         self.loop_checkbox.blockSignals(False)
         self.refresh_motion()
+        self.refresh_track_visualization()
 
     def refresh_title(self):
         if not self.project_active:
-            self.setWindowTitle('Linux Animation Studio v0.17 - No project open')
+            self.setWindowTitle('Linux Animation Studio v0.19 - No project open')
             return
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.17 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v0.19 - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
