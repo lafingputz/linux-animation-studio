@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.22: multi-frame editing and timeline interaction."""
+"""Linux Animation Studio v0.23: desktop portability and editing-mode visibility."""
 import io
 import wave
 import time
@@ -10,13 +10,14 @@ import subprocess
 import tempfile
 import json
 import sys
+import platform
 import uuid
 import zipfile
 from dataclasses import dataclass, field
 from bisect import bisect_left
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
+from PySide6.QtCore import QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
 )
 
-APP_VERSION = "0.22.0"
+APP_VERSION = "0.23.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -57,7 +58,36 @@ def image_from_bytes(data, width, height):
     return img.convertToFormat(IMAGE_FORMAT)
 
 
-BRUSH_ROOT = Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local' / 'share'))) / 'linux-animation-studio' / 'brushes'
+def application_data_root():
+    """OS-appropriate application data; keep the established Linux brush path."""
+    if sys.platform.startswith('linux'):
+        base = Path(os.environ.get('XDG_DATA_HOME') or (Path.home() / '.local' / 'share'))
+        return base / 'linux-animation-studio'
+    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    if location:
+        base = Path(location)
+        # Qt may already append the application name; never append it twice.
+        return base if base.name.lower() == 'linuxanimationstudio' else base / 'LinuxAnimationStudio'
+    return Path.home() / '.linux-animation-studio'
+
+
+BRUSH_ROOT = application_data_root() / 'brushes'
+
+
+def resolve_ffmpeg():
+    """Look for FFmpeg on PATH, in an override, or beside a packaged executable."""
+    override = os.environ.get('LAS_FFMPEG_PATH')
+    candidates = []
+    if override:
+        candidates.append(Path(override).expanduser())
+    exe_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
+    candidates.append(Path(sys.executable).resolve().parent / exe_name)
+    candidates.append(Path(__file__).resolve().parent / exe_name)
+    for candidate in candidates:
+        if candidate.is_file() and (os.name == 'nt' or os.access(candidate, os.X_OK)):
+            return str(candidate)
+    return shutil.which('ffmpeg')
+
 
 
 def load_custom_brushes():
@@ -2039,8 +2069,8 @@ class PannableScrollArea(QScrollArea):
 def audio_waveform(data, suffix, bins=180):
     """Produce low-cost peak overview using bundled FFmpeg or the WAV reader."""
     try:
-        if shutil.which('ffmpeg'):
-            result = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error',
+        if resolve_ffmpeg():
+            result = subprocess.run([resolve_ffmpeg(), '-hide_banner', '-loglevel', 'error',
                 '-i', 'pipe:0', '-f', 's16le', '-ac', '1', '-ar', '8000', 'pipe:1'],
                 input=data, capture_output=True, timeout=25, check=True)
             raw = result.stdout
@@ -2516,6 +2546,13 @@ class MainWindow(QMainWindow):
         self.multi_edit_checkbox.setChecked(False)
         self.multi_edit_checkbox.toggled.connect(self._set_multi_edit)
         cel_page_layout.addWidget(self.multi_edit_checkbox)
+        # Always-visible warning, even when the Cels settings tab is not selected.
+        self.multi_edit_indicator = QLabel('Single-frame drawing')
+        self.multi_edit_indicator.setToolTip('Multi-frame editing is off; only the current frame is changed.')
+        self.multi_edit_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.multi_edit_indicator.setStyleSheet('QLabel { color: #61646a; padding: 3px 10px; border: 1px solid #8a8d92; border-radius: 4px; }')
+        frame_controls.addWidget(self.multi_edit_indicator)
+
         self.track_visualization = QLabel('Cel tracks')
         self.track_visualization.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.track_visualization.setWordWrap(True)
@@ -2885,10 +2922,26 @@ class MainWindow(QMainWindow):
     def _timeline_selection_changed(self):
         self.timeline_selected_frames = sorted({i.row() for i in self.frame_list.selectedIndexes()})
         self.canvas.multi_edit_frames = list(self.timeline_selected_frames)
+        self._refresh_multi_edit_indicator()
+
+    def _refresh_multi_edit_indicator(self):
+        if not hasattr(self, 'multi_edit_indicator'):
+            return
+        enabled = self.multi_edit_checkbox.isChecked()
+        count = len(self.timeline_selected_frames)
+        if enabled:
+            self.multi_edit_indicator.setText(f'MULTI-FRAME EDIT ON ({count} selected)')
+            self.multi_edit_indicator.setToolTip('Edits may affect multiple selected cels. Linked cels are edited once.')
+            self.multi_edit_indicator.setStyleSheet('QLabel { color: #ffffff; background: #97502d; font-weight: bold; padding: 3px 10px; border: 2px solid #d68a54; border-radius: 4px; }')
+        else:
+            self.multi_edit_indicator.setText('Single-frame drawing')
+            self.multi_edit_indicator.setToolTip('Multi-frame editing is off; only the current frame is changed.')
+            self.multi_edit_indicator.setStyleSheet('QLabel { color: #61646a; padding: 3px 10px; border: 1px solid #8a8d92; border-radius: 4px; }')
 
     def _set_multi_edit(self, checked):
         self.canvas.multi_edit_enabled = bool(checked)
         self.canvas.multi_edit_frames = list(self.timeline_selected_frames)
+        self._refresh_multi_edit_indicator()
         self.status.setText('Multi-frame editing enabled for selected frames.' if checked else
                             'Multi-frame editing disabled.')
 
@@ -3095,6 +3148,7 @@ class MainWindow(QMainWindow):
                     self.frame_list.item(selected_index).setSelected(True)
             self.timeline_selected_frames = [i for i in old_selected if i < self.frame_list.count()]
         self.canvas.multi_edit_frames = list(self.timeline_selected_frames)
+        self._refresh_multi_edit_indicator()
         self.frame_list.blockSignals(False)
         self.frame_label.setText(f'Frame {self.canvas.frame_index + 1} / {len(self.canvas.frames)}')
         self.frame_jump.blockSignals(True)
@@ -3604,9 +3658,9 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         is_mp4 = fmt.currentIndex() == 2
-        if is_mp4 and not shutil.which('ffmpeg'):
+        if is_mp4 and not resolve_ffmpeg():
             QMessageBox.warning(self, 'FFmpeg missing',
-                                'Install FFmpeg with: sudo apt install ffmpeg')
+                                'FFmpeg was not found. Install FFmpeg and add it to PATH, or set LAS_FFMPEG_PATH to its executable.')
             return
         if is_mp4:
             destination, _ = QFileDialog.getSaveFileName(
@@ -3662,7 +3716,7 @@ class MainWindow(QMainWindow):
                     progress.setLabelText('Encoding MP4 with FFmpeg...')
                     progress.setRange(0, 0)
                     crf = [18, 23, 28][quality.currentIndex()]
-                    command = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                    command = [resolve_ffmpeg(), '-hide_banner', '-loglevel', 'error', '-y',
                                '-framerate', str(output_fps), '-i', str(folder / 'frame_%06d.png')]
                     if getattr(self.canvas, 'audio_bytes', None):
                         audio_path = folder / ('audio_input' + self.canvas.audio_suffix)
@@ -3705,6 +3759,8 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
+    QCoreApplication.setOrganizationName('LinuxAnimationStudio')
+    QCoreApplication.setApplicationName('LinuxAnimationStudio')
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

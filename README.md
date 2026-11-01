@@ -1,48 +1,58 @@
-# Linux Animation Studio v0.22.0 (experimental)
+# Linux Animation Studio v0.23.0
 
-Built on the validated v0.21.1 source. Desktop Python/PySide6 drawing and 2D animation app.
+Cross-platform preparation release based on the validated v0.22.0 branch.
 
-## New in v0.22
+## What's new
 
-- **Multi-frame edit toggle:** In the **Cels** timeline tab, enable **Multi-frame Edit**. Select frames with Shift+click (range) or Ctrl+click (individual), then draw, erase, or apply a raster transform. The current active layer is the target; its selected frames are edited at the same document coordinates.
-- **Shared cel safety:** Frames sharing a cel ID are edited only once per operation. Linked and held frames remain linked. To edit them independently, first use Unlink or Break / New Cel.
-- **Grouped history:** An entire multi-frame stroke or raster transform is one undo/redo timeline snapshot. Large selections may consume noticeably more memory and time; this is a test build.
-- **Live exposure drag preview:** Hold the turquoise handle at a frame's right edge and move toward later frames; destination frames are highlighted while dragging. Artwork changes only on release. Existing independent artwork remains protected.
-- **Continuous waveform dragging:** Drag across the audio waveform to seek the playhead and corresponding frame continuously. **This is silent seeking**: audible snippet playback while scrubbing is not supported yet.
-- Title and About information updated to v0.22.0.
+- **Cross-platform brush data directory.** Linux intentionally retains the existing `$XDG_DATA_HOME/linux-animation-studio/brushes` (or `~/.local/share/linux-animation-studio/brushes`) directory. Windows and macOS use Qt's standard per-user application-data folder. This does not move or delete existing Linux brushes.
+- **FFmpeg discovery.** WAV/MP3 waveform decoding and MP4 export locate FFmpeg using `LAS_FFMPEG_PATH`, an executable alongside the Python/packaged app, or system `PATH`. An error message no longer assumes Ubuntu or apt.
+- **Multi-frame Edit warning.** The transport row displays an orange `MULTI-FRAME EDIT ON (N selected)` label whenever batch editing is enabled, even while the Cels tab is hidden.
+- **Application version:** v0.23.0. `.las` file format **remains v6**, and the documented launch method is unchanged.
 
-## Installation
+## Run from source (Linux, Windows or macOS)
 
-Keep the standard four files in your GitHub repository, pull on the Surface, and run:
+Install Python 3, create a virtual environment, and install the requirements:
 
-```bash
-cd ~/Projects/linux-animation-studio
-git pull --ff-only
-source .venv/bin/activate
+```sh
+python -m venv .venv
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-Requires Python and PySide6, plus FFmpeg for audio handling and MP4 output. No change to `requirements.txt`.
+Activate the environment before installing/running if desired. On Linux/macOS: `source .venv/bin/activate`; on Windows PowerShell: `.venv\\Scripts\\Activate.ps1`. If `python` maps to a different installation, use `python3` or the Windows `py` launcher.
 
-## Compatibility and safety
+**For the existing Surface Pro 3 workflow:** keep your existing repository and `.venv`, pull the latest commit, then `python main.py` as before.
 
-- `.las` project format remains v6 and older project loading code is retained.
-- Back up important `.las` files before the first multi-frame edits. This build hasn't been run against an actual Wacom/Qt GUI here.
-- Multi-frame edits affect the active *animated raster layer*, not every layer or motion object. Motion-object keyframes are not batch transformed.
-- Existing selection masks apply at the same document-space coordinates to each target cel.
-- All selected frames can be shared cel exposures; they will be processed once per unique cel.
-- The timeline's maximum frame count and existing export behavior remain unchanged.
+FFmpeg must be separately installed for MP3 waveform decoding and MP4 export, unless an executable has been provided alongside the application. Put it on `PATH` or set `LAS_FFMPEG_PATH` to the executable (for example, on Windows, `C:\\ffmpeg\\bin\\ffmpeg.exe`). Audio playback uses Qt Multimedia and depends on codecs available in the target environment.
 
-## Suggested acceptance tests
+## Experimental builds (not prebuilt binaries)
 
-1. Select frames 2–5 with Shift+click, enable Multi-frame Edit, and paint a stroke. Check all selected **independent** cels.
-2. Undo once and verify every target frame reverts; redo once and check all return.
-3. Repeat with eraser, custom brush, pressure-sensitive Wacom, and lasso selection.
-4. Link two selected frames to a shared cel, draw with multi-edit, and verify no doubled opacity or repeated marks.
-5. Transform several independent selected cels and undo once.
-6. Toggle Multi-frame Edit off and confirm edits once again affect only the current cel.
-7. Drag an exposure grip and confirm frames highlight before releasing; confirm occupied-frame protection.
-8. Drag the waveform and confirm the playhead updates as you move, then audio plays from the sought position.
-9. Confirm v0.21.1 regression behavior: Space+Wacom pan, Focus Mode, playback, onion skins, existing linked/held cels, save/reopen, PNG and MP4 export, keyboard preferences, shortcuts.
+Packaging requires building **on each target OS** with matching Python/PySide6 architecture. PyInstaller is one possible development packaging option:
 
-Please report failures as **passed / partial / failed / untested** and note any errors shown in the terminal.
+```sh
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm --clean --windowed --name LinuxAnimationStudio main.py
+```
+
+Test the `dist/LinuxAnimationStudio` output on the **same target operating system**. On macOS the output may be an `.app` bundle; on Windows an executable directory. Do not assume an archive built on Linux will run on Windows or macOS. Bundling FFmpeg requires separate binary distribution and licensing review. Public macOS releases also need appropriate signing/notarization. These builds are experimental; installers, signing, and shipping standalone binaries are **not** included in this four-file source ZIP.
+
+## Cross-platform acceptance tests
+
+1. **Linux:** existing brush presets and `.las` files load in place; check all v0.22 editing and audio regressions.
+2. **Windows/macOS:** launch from source; create a project, draw, save/reopen; check tablet pressure and event handling on connected pen hardware.
+3. **Keyboard:** verify Cmd/Ctrl conventions and saved custom shortcuts, including Space+drag, playback, and Focus Mode.
+4. **Audio:** import WAV/MP3, seek/play, save/reopen the embedded track, export MP4 with FFmpeg available.
+5. **Display:** check Wacom/canvas alignment at 100%, 200%, and high-DPI/Retina scaling; window resize and timeline behavior.
+6. **Portability:** transfer an embedded-audio `.las` v6 project between operating systems and validate drawings, cel relationships, and playback.
+7. **Mode awareness:** choose multiple frames, enable Multi-frame Edit, confirm orange label stays visible while switching tabs, then disable it.
+8. **Packaging:** optionally build and launch a PyInstaller development bundle on Windows/macOS; confirm resource paths and FFmpeg behavior.
+
+## Known limitations
+
+- Windows and macOS **have not yet been run or hardware-tested** for this build. Tablet drivers and Qt Multimedia backend availability vary.
+- Qt6 supports high-DPI scaling, but alignment on actual Retina/Windows fractional-scaling hardware needs testing.
+- Multi-frame Edit remains opt-in to protect against accidental changes to several drawings.
+- Audible scrubbing is not implemented; waveform dragging seeks the timeline.
+- This release preserves the single-file `main.py` source architecture. Modularization remains future work.
+- `.las` format version 6 may not be readable by older app releases. Backup important projects before editing them with a development build.
