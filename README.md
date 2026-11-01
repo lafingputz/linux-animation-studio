@@ -1,41 +1,40 @@
-# Linux Animation Studio v0.17.6 — canvas navigation candidate
+# Linux Animation Studio v0.18 — Lasso Selection Test Build
 
-This release builds on v0.17.5. It introduces a shared navigation state machine (`idle`, `armed`, `dragging`) and a dedicated **Pan Canvas** tool alongside Space+Wacom drag. `LAS_PAN_DEBUG=1` logs explicit stop reasons such as `tablet_release`, `space_released`, `window_deactivated`, or `tool_changed`.
+This update builds directly from the tested v0.17.6 navigation release. It adds three modes under the existing **Selection** tool: Rectangle, Freehand Lasso, and Polygonal Lasso. Selection boundaries use an antialiased document-size ARGB mask and a QPainterPath; a bounding box is retained for move and transform handles.
 
-## Test on the Surface Pro 3
+## Controls
 
-1. Zoom to 400%. With the Brush selected, hold Space and drag continuously with the Wacom pen. Panning should continue for the full gesture.
-2. Select **Pan Canvas** in the left panel and drag with the Wacom **without Space**. Confirm it pans and does not draw.
-3. Lift the pen and drag again. Release Space to return to Brush behavior, or switch from Pan to Brush.
-4. Ensure there are no stray marks; confirm alignment after panning and zooming.
-5. Press Space while a button is focused to confirm it does not activate. Press **P** to test playback.
-6. Retest the timeline, onion skins, custom brushes, project saving, and exports.
+- **Rectangle**: press, drag, release.
+- **Freehand Lasso**: drag to trace, then lift pen to close. The closing segment is drawn from pen-up to the first point.
+- **Polygonal Lasso**: press/tap to set vertices. Finish by double-clicking/double-tapping, tapping near the first point (three or more points), or pressing Enter. Backspace removes a vertex, Escape cancels an unfinished polygon.
+- **Ctrl+D**: deselect. **Ctrl+A**: select all.
+- Choose **Move Pixels** or **Transform** to edit a selected region. **Brush from Selection** respects the mask.
+- The dedicated **Pan Canvas** tool and **Space + Wacom drag** remain available.
 
-## Diagnostics if the pan still interrupts
+## Important notes
 
-```bash
-LAS_PAN_DEBUG=1 python main.py 2>&1 | tee ~/las-pan-debug.log
-```
+- Selections are in-memory editing state and are not persisted in `.las` files; all raster edits made with them are saved normally.
+- Existing `.las` v4 project files and the persisted custom brush library remain unchanged.
+- Polygonal double-tap is supported with a short tap window, but the platform may also deliver an ordinary Qt double-click.
+- Antialiased path clipping is supplied through Qt's painter; inspect stroke and eraser edges closely on the Surface.
+- This is a **test build**. Python syntax compilation has passed; graphical application behavior, Wacom tablet behavior on Wayland, selection blending, and exporting must be verified on hardware.
 
-Look for `STOP reason=tablet_release` while the pen is still physically down. That would identify unexpected tablet release delivery, rather than scrollbar limits or keyboard focus. If events stop without `STOP`, it points to event routing or tablet delivery instead. Review pointer coordinates before sharing logs.
+## Acceptance tests
 
-This source is syntax-checked, but live Qt/Wacom behavior still requires testing under Pop!_OS/Wayland.
+1. Rectangle selection: drag, paint, erase, move, and transform as before.
+2. Freehand selection: trace a complex curve using Wacom; lift pen and inspect the closure.
+3. Polygonal selection: test double-tap, closing near the start, Enter, Backspace, and Escape.
+4. Paint and erase both near the edges and outside an irregular selected area.
+5. Move only selected pixels, retaining the source artwork outside the selection.
+6. Scale and rotate irregular selections. Verify no rectangular pixels are included.
+7. Create both full-color and tintable brushes from lasso artwork.
+8. Verify selections under Ctrl+0, zoom, panning, and Wacom hover alignment.
+9. Regression: timeline, onion skins, layers, `.las` save/reopen, animation playback, PNG and MP4 exports, custom-brush dynamics, undo/redo.
+10. Navigation regression: uninterrupted Space + Wacom dragging and dedicated Pan Canvas tool.
 
-# Linux Animation Studio v0.17.6
+## Install using GitHub
 
-Targeted canvas-navigation candidate fix for a Wacom stylus pan that begins moving and then stops before the pen is lifted (Pop!_OS, Wayland).
-
-## Changes from v0.17.4
-
-- Observe the full duration of an active pan across application widgets: scrolling can move the canvas out from under the stylus, changing the event recipient.
-- Prefer real tablet movement once it is detected; discard duplicate or stale synthetic mouse moves instead of letting them corrupt the tablet's previous position.
-- Keep Space from activating focused buttons. Releasing Space or deactivating the application cancels a pan.
-- Provide optional diagnostic output for event continuity and scrollbar movement.
-- Retain v0.17.4 brush dynamics, timeline, onion skin ranges, save format, export, and existing drawing modes.
-
-## Install
-
-Replace the same four repository files in GitHub and run on the Surface:
+Copy **main.py**, **README.md**, **requirements.txt** and **.gitignore** into your existing repository on the Mac, then run on your Surface:
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -43,29 +42,3 @@ git pull --ff-only
 source .venv/bin/activate
 python main.py
 ```
-
-## Test
-
-1. Zoom in to **200% or more**, so the document is larger than the viewport and both scrollbars have room to move.
-2. Press and hold **Space**, touch the canvas with the pen, and drag continuously in several directions. The canvas should follow until pen-up.
-3. Confirm there are no stray marks. Release Space and confirm drawing and pressure work normally.
-4. Click a tool button and press Space; it must not reactivate. Press **P** to test animation playback.
-5. Check timeline hide/show, onion skins, project reopen and export.
-
-## If panning still stops: optional diagnostic log
-
-Start the app in a terminal using:
-
-```bash
-LAS_PAN_DEBUG=1 python main.py 2>&1 | tee ~/las-pan-debug.log
-```
-
-Zoom in, perform one slow Space+Wacom drag that stalls, release the pen, and inspect the lines beginning `[LAS PAN]`. `MOVE` entries report how far Qt says the pen moved, the scrollbar values before/after, and the scroll limits. The distinction matters:
-
-- `START` followed by no `MOVE`: the pen movement events stopped reaching the app.
-- `MOVE` entries with delta `(0, 0)` or unchanging positions: Qt's reported global pen position is not advancing.
-- `MOVE` entries with changing delta but fixed scrollbar values at a limit: the viewport cannot scroll farther in that direction.
-
-Feel free to paste just the `[LAS PAN]` lines. The log prints pointer positions in display coordinates, so review them before sharing if you prefer. No middle mouse is needed to test.
-
-Static Python syntax checks passed. Real tablet/Wayland behavior is not verified until tested on the Surface.

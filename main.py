@@ -1,5 +1,6 @@
-"""Linux Animation Studio v0.17.6: explicit navigation states and Pan tool."""
+"""Linux Animation Studio v0.18: selection masks and lasso modes."""
 import io
+import time
 import os
 import math
 import random
@@ -15,7 +16,7 @@ from bisect import bisect_left
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -153,7 +154,13 @@ class Canvas(QWidget):
         self.eraser_size = 48
         self.zoom = 1.0
         self.tool = 'brush'  # brush, eraser, select, move
-        self.selection = None  # QRect in document pixels
+        self.selection = None  # Bounding QRect in document pixels
+        self.selection_path = None  # Actual selected geometry, with antialiased edges
+        self.selection_mask = None  # ARGB mask shared by raster operations
+        self.selection_mode = 'rectangle'
+        self.lasso_points = []
+        self.lasso_preview = None
+        self._polygon_last_click = None
         self.drag_origin = None
         self.drag_rect = None
         self.move_source = None
@@ -375,8 +382,7 @@ class Canvas(QWidget):
                 # Preview the source pixels at their destination without permanently changing the layer.
                 preview_layer = layer.image.copy()
                 ghost = QPainter(preview_layer)
-                ghost.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-                ghost.fillRect(self.move_source_rect, Qt.GlobalColor.transparent)
+                self._clear_selected(ghost, self.move_source_rect)
                 ghost.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
                 ghost.drawImage(self.move_preview.topLeft(), self.move_source)
                 ghost.end()
@@ -401,12 +407,26 @@ class Canvas(QWidget):
                         p.drawImage(0, 0, neighbor)
             p.setOpacity(1.0)
         outlined = None if self.playing else (self.drag_rect if self.drag_rect is not None else self.selection)
-        if outlined is not None and not outlined.isEmpty():
+        if outlined is not None and not outlined.isEmpty() and (self.selection_path is None or self.drag_rect is not None):
             p.setPen(QPen(QColor(255,255,255), 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(outlined)
             p.setPen(QPen(QColor(10,10,10), 1, Qt.PenStyle.DotLine))
             p.drawRect(outlined.adjusted(1,1,-1,-1))
+        if self.selection_path is not None and not self.playing:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor('#ffffff'), 1 / self.zoom, Qt.PenStyle.DashLine))
+            p.drawPath(self.selection_path)
+            p.setPen(QPen(QColor('#191919'), 1 / self.zoom, Qt.PenStyle.DotLine))
+            p.drawPath(self.selection_path)
+        if self.lasso_preview is not None and not self.playing:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor('#333333'), 1.4 / self.zoom, Qt.PenStyle.DashLine))
+            p.drawPath(self.lasso_preview)
+            if self.selection_mode == 'polygonal':
+                for v in self.lasso_points:
+                    p.setBrush(QColor('#ffffff'))
+                    p.drawEllipse(v, 3 / self.zoom, 3 / self.zoom)
         if session and not self.playing:
             self._paint_transform_handles(p, session)
         if self.hover_position is not None and not self.playing:
@@ -470,7 +490,7 @@ class Canvas(QWidget):
                 return False
             self.transform_session = dict(kind='raster', id=layer.id, frame=self.frame_index,
                 rect=QRectF(rect), pivot=QPointF(rect.center()),
-                source=layer.image.copy(), offset=QPointF(0, 0), scale=1.0, angle=0.0)
+                source=layer.image.copy(), selection_mask=self.selection_mask.copy() if self.selection_mask is not None else None, offset=QPointF(0, 0), scale=1.0, angle=0.0)
         self.tool = 'transform'
         self._enforce_cursor()
         self.update()
@@ -495,9 +515,16 @@ class Canvas(QWidget):
         image = session['source'].copy()
         rect = session['rect'].toAlignedRect()
         crop = session['source'].copy(rect)
+        mask = session.get('selection_mask')
+        if mask is not None:
+            crop = self._masked_crop(session['source'], rect, mask)
         painter = QPainter(image)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        painter.fillRect(rect, Qt.GlobalColor.transparent)
+        if mask is not None:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            painter.drawImage(0, 0, mask)
+        else:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(rect, Qt.GlobalColor.transparent)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.setTransform(self._transform_matrix(session))
@@ -725,7 +752,9 @@ class Canvas(QWidget):
             self._include_point(self.last, self.size)
         painter = QPainter(layer.image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        if self.selection is not None:
+        if self.selection_path is not None:
+            painter.setClipPath(self.selection_path)
+        elif self.selection is not None:
             painter.setClipRect(self.selection)
         if self.tool == 'eraser':
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
@@ -947,11 +976,86 @@ class Canvas(QWidget):
         self.eraser = tool == "eraser"
         self.refresh_cursor()
 
-    def set_selection(self, rect):
-        self.selection = rect.intersected(QRect(0, 0, self.width_px, self.height_px)) if rect else None
-        if self.selection is not None and self.selection.isEmpty():
-            self.selection = None
+    def set_selection_mode(self, mode):
+        if mode not in ('rectangle', 'freehand', 'polygonal'):
+            return
+        self.selection_mode = mode
+        self.lasso_points = []
+        self.lasso_preview = None
+        self._polygon_last_click = None
+        self.drag_rect = None
+        self.drag_origin = None
         self.update()
+
+    def set_selection_path(self, path):
+        self.lasso_points = []
+        self.lasso_preview = None
+        self._polygon_last_click = None
+        if path is None or path.isEmpty():
+            self.selection = None
+            self.selection_path = None
+            self.selection_mask = None
+        else:
+            bounds = path.boundingRect().toAlignedRect().intersected(QRect(0, 0, self.width_px, self.height_px))
+            if bounds.isEmpty():
+                self.selection = self.selection_path = self.selection_mask = None
+            else:
+                self.selection = bounds
+                self.selection_path = QPainterPath(path)
+                mask = transparent_image(self.width_px, self.height_px)
+                painter = QPainter(mask)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.fillPath(path, QColor(255, 255, 255, 255))
+                painter.end()
+                self.selection_mask = mask
+        self.update()
+
+    def set_selection(self, rect):
+        if rect is None or rect.isEmpty():
+            self.set_selection_path(None)
+        else:
+            path = QPainterPath()
+            path.addRect(QRectF(rect.intersected(QRect(0, 0, self.width_px, self.height_px))))
+            self.set_selection_path(path)
+
+    def _masked_crop(self, image, rect, mask=None):
+        crop = image.copy(rect)
+        actual_mask = self.selection_mask if mask is None else mask
+        if actual_mask is not None:
+            painter = QPainter(crop)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            painter.drawImage(QPoint(-rect.x(), -rect.y()), actual_mask)
+            painter.end()
+        return crop
+
+    def _clear_selected(self, painter, rect):
+        if self.selection_mask is None:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.fillRect(rect, Qt.GlobalColor.transparent)
+        else:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            painter.drawImage(0, 0, self.selection_mask)
+
+    def _update_lasso_preview(self, position=None):
+        if not self.lasso_points:
+            self.lasso_preview = None
+            return
+        path = QPainterPath(self.lasso_points[0])
+        for point in self.lasso_points[1:]:
+            path.lineTo(point)
+        if position is not None and self.selection_mode == 'polygonal':
+            path.lineTo(position)
+        self.lasso_preview = path
+        self.update()
+
+    def finish_polygon(self):
+        if self.selection_mode != 'polygonal' or len(self.lasso_points) < 3:
+            return
+        path = QPainterPath(self.lasso_points[0])
+        for point in self.lasso_points[1:]:
+            path.lineTo(point)
+        path.closeSubpath()
+        self.set_selection_path(path)
 
     def select_all(self):
         self.set_selection(QRect(0, 0, self.width_px, self.height_px))
@@ -960,6 +1064,13 @@ class Canvas(QWidget):
         self.set_selection(None)
 
     def keyPressEvent(self, event):
+        if self.tool == 'select' and self.selection_mode == 'polygonal' and self.lasso_points:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.finish_polygon(); event.accept(); return
+            if event.key() == Qt.Key.Key_Backspace:
+                self.lasso_points.pop(); self._update_lasso_preview(); event.accept(); return
+            if event.key() == Qt.Key.Key_Escape:
+                self.lasso_points.clear(); self.lasso_preview = None; self.update(); event.accept(); return
         if self.transform_session is not None:
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.apply_transform()
@@ -982,9 +1093,27 @@ class Canvas(QWidget):
         if self.tool == 'transform':
             self._transform_press(QPointF(position))
         elif self.tool == 'select':
+            if self.selection_mode == 'polygonal':
+                pos = QPointF(position)
+                now = time.monotonic()
+                double_tap = (self._polygon_last_click is not None
+                              and now - self._polygon_last_click[0] < 0.38
+                              and (pos - self._polygon_last_click[1]).manhattanLength() <= 9 / self.zoom)
+                self._polygon_last_click = (now, pos)
+                if len(self.lasso_points) >= 3 and (
+                        (pos - self.lasso_points[0]).manhattanLength() <= 12 / self.zoom or double_tap):
+                    self.finish_polygon()
+                elif not double_tap:
+                    self.lasso_points.append(pos)
+                    self._update_lasso_preview(pos)
+                return
             self.drag_origin = point
-            self.drag_rect = QRect(point, point).normalized()
-            self.update()
+            if self.selection_mode == 'freehand':
+                self.lasso_points = [QPointF(position)]
+                self._update_lasso_preview()
+            else:
+                self.drag_rect = QRect(point, point).normalized()
+                self.update()
         elif self.tool == 'move':
             layer = self.active_layer()
             if layer is None or not layer.visible:
@@ -993,7 +1122,7 @@ class Canvas(QWidget):
             self.drag_origin = point
             self.move_layer_id = layer.id
             self.move_source_rect = self.selection or layer.image.rect()
-            self.move_source = layer.image.copy(self.move_source_rect)
+            self.move_source = self._masked_crop(layer.image, self.move_source_rect)
             self.move_preview = QRect(self.move_source_rect)
             self.move_offset = QPoint(0, 0)
             self.update()
@@ -1002,11 +1131,20 @@ class Canvas(QWidget):
         if self.tool == 'transform' and self.transform_drag is not None:
             self._transform_move(QPointF(position))
             return
+        if self.tool == 'select' and self.selection_mode == 'polygonal':
+            self._update_lasso_preview(QPointF(position))
+            return
         if self.drag_origin is None:
             return
         point = self._point(position)
         if self.tool == 'select':
-            self.drag_rect = QRect(self.drag_origin, point).normalized().adjusted(0, 0, 1, 1)
+            if self.selection_mode == 'freehand':
+                pos = QPointF(position)
+                if not self.lasso_points or (pos - self.lasso_points[-1]).manhattanLength() >= 0.5:
+                    self.lasso_points.append(pos)
+                self._update_lasso_preview()
+            else:
+                self.drag_rect = QRect(self.drag_origin, point).normalized().adjusted(0, 0, 1, 1)
         elif self.tool == 'move' and self.move_preview is not None:
             self.move_offset = point - self.drag_origin
             self.move_preview = self.move_source_rect.translated(self.move_offset)
@@ -1021,8 +1159,17 @@ class Canvas(QWidget):
             return
         self._update_interaction(position)
         if self.tool == 'select':
-            self.set_selection(self.drag_rect)
-            self.drag_rect = None
+            if self.selection_mode == 'freehand':
+                if len(self.lasso_points) >= 3:
+                    path = QPainterPath(self.lasso_points[0])
+                    for vertex in self.lasso_points[1:]: path.lineTo(vertex)
+                    path.closeSubpath()
+                    self.set_selection_path(path)
+                self.lasso_points = []
+                self.lasso_preview = None
+            else:
+                self.set_selection(self.drag_rect)
+                self.drag_rect = None
         elif self.tool == 'move' and self.move_source is not None:
             layer = self.layer_by_id(self.move_layer_id)
             if layer is not None and not self.move_offset.isNull():
@@ -1031,8 +1178,7 @@ class Canvas(QWidget):
                 affected = source.united(destination).intersected(layer.image.rect())
                 before = layer.image.copy(affected)
                 painter = QPainter(layer.image)
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-                painter.fillRect(source, Qt.GlobalColor.transparent)
+                self._clear_selected(painter, source)
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
                 painter.drawImage(destination.topLeft(), self.move_source)
                 painter.end()
@@ -1040,8 +1186,8 @@ class Canvas(QWidget):
                 if before != after:
                     self._push(dict(type='patch', id=layer.id, rect=affected,
                                     before=before, after=after))
-                if self.selection is not None:
-                    self.selection = destination.intersected(layer.image.rect())
+                if self.selection_path is not None:
+                    self.set_selection_path(self.selection_path.translated(self.move_offset))
             self.move_preview = None
             self.move_source = None
             self.move_layer_id = None
@@ -1100,6 +1246,13 @@ class Canvas(QWidget):
         self.diagnostic.emit(f'TABLET: {name} | pressure: {pressure:.3f} | tilt: '
                              f'{event.xTilt():.0f}, {event.yTilt():.0f} | {typ.name}')
         event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if self.tool == 'select' and self.selection_mode == 'polygonal':
+            self.finish_polygon()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -1263,6 +1416,10 @@ class Canvas(QWidget):
         self.move_source = None
         self.move_preview = None
         self.selection = None
+        self.selection_path = None
+        self.selection_mask = None
+        self.lasso_points = []
+        self.lasso_preview = None
         self.width_px, self.height_px = width, height
         self.layers = [Layer(uuid.uuid4().hex, 'Layer 1', transparent_image(width, height))]
         self.frames = [self.layers]
@@ -1677,13 +1834,21 @@ class MainWindow(QMainWindow):
         left.addWidget(QLabel('TOOLS'))
         self.tool_buttons = {}
         for tool, text in [('brush','Brush'), ('eraser','Eraser'),
-                           ('select','Rectangle Select'), ('move','Move Pixels'), ('transform','Transform'), ('pan','Pan Canvas')]:
+                           ('select','Selection'), ('move','Move Pixels'), ('transform','Transform'), ('pan','Pan Canvas')]:
             b = QPushButton(text)
             b.setCheckable(True)
             b.setMinimumWidth(130)
             b.clicked.connect(lambda checked, t=tool: self.set_tool(t))
             self.tool_buttons[tool] = b
             left.addWidget(b)
+        self.selection_mode_picker = QComboBox()
+        self.selection_mode_picker.addItem('Rectangle', 'rectangle')
+        self.selection_mode_picker.addItem('Freehand Lasso', 'freehand')
+        self.selection_mode_picker.addItem('Polygonal Lasso', 'polygonal')
+        self.selection_mode_picker.currentIndexChanged.connect(
+            lambda i: self.canvas.set_selection_mode(self.selection_mode_picker.itemData(i)))
+        left.addWidget(QLabel('Selection mode'))
+        left.addWidget(self.selection_mode_picker)
         self.tool_buttons['brush'].setChecked(True)
         transform_buttons = QHBoxLayout()
         apply_button = QPushButton('Apply Transform')
@@ -2308,9 +2473,9 @@ class MainWindow(QMainWindow):
         layer = self.canvas.active_layer()
         rect = self.canvas.selection
         if layer is None or rect is None or rect.isEmpty():
-            QMessageBox.information(self, 'Custom brush', 'Choose a drawing layer and make a rectangle selection first.')
+            QMessageBox.information(self, 'Custom brush', 'Choose a drawing layer and make a selection first.')
             return
-        self._create_custom_brush(layer.image.copy(rect))
+        self._create_custom_brush(self.canvas._masked_crop(layer.image, rect))
 
     def make_custom_brush_from_layer(self):
         layer = self.canvas.active_layer()
