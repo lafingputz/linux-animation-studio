@@ -1,5 +1,6 @@
-"""Linux Animation Studio v0.19: exposure holds and linked cels."""
+"""Linux Animation Studio v0.20: embedded audio and canvas focus mode."""
 import io
+import wave
 import time
 import os
 import math
@@ -15,8 +16,9 @@ from dataclasses import dataclass, field
 from bisect import bisect_left
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -25,7 +27,7 @@ from PySide6.QtWidgets import (
 
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
-PROJECT_VERSION = 5
+PROJECT_VERSION = 6
 MAX_STEPS = 50
 MAX_HISTORY_BYTES = 96 * 1024 * 1024
 
@@ -1573,6 +1575,9 @@ class Canvas(QWidget):
         self.onion_previous = 1
         self.onion_next = 1
         self.loop_playback = True
+        self.audio_bytes = None
+        self.audio_name = ''
+        self.audio_suffix = ''
         self._undo.clear()
         self._redo.clear()
         self.setFixedSize(round(width * self.zoom), round(height * self.zoom))
@@ -1590,7 +1595,8 @@ class Canvas(QWidget):
                         active_frame=self.frame_index, fps=self.fps,
                         onion_enabled=self.onion_enabled, onion_opacity=self.onion_opacity,
                         onion_previous=self.onion_previous, onion_next=self.onion_next,
-                        loop_playback=getattr(self, 'loop_playback', True), frames=[], motion_objects=[])
+                        loop_playback=getattr(self, 'loop_playback', True), frames=[], motion_objects=[],
+                        audio=None)
         path = Path(path)
         temporary = path.with_name(path.name + '.tmp')
         try:
@@ -1610,6 +1616,13 @@ class Canvas(QWidget):
                         keys={str(k): list(v) for k, v in obj.keys.items()}))
                 manifest['active_motion_id'] = self.active_motion_id
                 manifest['active_layer'] = self.active_id
+                if getattr(self, 'audio_bytes', None):
+                    suffix = self.audio_suffix
+                    if suffix not in ('.wav', '.mp3'):
+                        raise ValueError('Unsupported embedded audio extension')
+                    audio_path = 'audio/track' + suffix
+                    archive.writestr(audio_path, self.audio_bytes)
+                    manifest['audio'] = {'file': audio_path, 'name': self.audio_name}
                 archive.writestr('manifest.json', json.dumps(manifest, indent=2))
                 archive.writestr('preview.png', png_bytes(self.composite(True)))
             temporary.replace(path)
@@ -1624,7 +1637,7 @@ class Canvas(QWidget):
         with zipfile.ZipFile(path, 'r') as archive:
             info = json.loads(archive.read('manifest.json'))
             version = info.get('version')
-            if info.get('format') != 'linux-animation-studio' or version not in (1, 2, 3, 4, 5):
+            if info.get('format') != 'linux-animation-studio' or version not in (1, 2, 3, 4, 5, 6):
                 raise ValueError('Unsupported .las project format/version')
             width, height = int(info['width']), int(info['height'])
             if not (1 <= width <= 8192 and 1 <= height <= 8192):
@@ -1721,6 +1734,20 @@ class Canvas(QWidget):
                         image_from_bytes(archive.read(filename), width, height), keys))
                 if len(motion_objects) > 20:
                     raise ValueError('Too many motion objects')
+            embedded_audio = None
+            embedded_name = ''
+            embedded_suffix = ''
+            if version >= 6 and info.get('audio'):
+                record = info['audio']
+                audio_file = record['file']
+                if audio_file not in ('audio/track.wav', 'audio/track.mp3'):
+                    raise ValueError('Invalid audio asset path')
+                audio_info = archive.getinfo(audio_file)
+                if audio_info.file_size > 80 * 1024 * 1024:
+                    raise ValueError('Embedded audio too large')
+                embedded_audio = archive.read(audio_file)
+                embedded_name = str(record.get('name', 'Audio'))[:160]
+                embedded_suffix = Path(audio_file).suffix
             active_id = info.get('active_layer')
             if not any(layer.id == active_id for layer in frames[index]):
                 active_id = frames[index][-1].id
@@ -1739,6 +1766,9 @@ class Canvas(QWidget):
         self.onion_previous = max(0, min(6, int(info.get('onion_previous', 1))))
         self.onion_next = max(0, min(6, int(info.get('onion_next', 1))))
         self.loop_playback = bool(info.get('loop_playback', True))
+        self.audio_bytes = embedded_audio
+        self.audio_name = embedded_name
+        self.audio_suffix = embedded_suffix
         self.layers = frames[index]
         self.active_id = active_id
         self.setFixedSize(round(width * self.zoom), round(height * self.zoom))
@@ -1931,6 +1961,62 @@ class PannableScrollArea(QScrollArea):
         return False
 
 
+def audio_waveform(data, suffix, bins=180):
+    """Produce low-cost peak overview using bundled FFmpeg or the WAV reader."""
+    try:
+        if shutil.which('ffmpeg'):
+            result = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error',
+                '-i', 'pipe:0', '-f', 's16le', '-ac', '1', '-ar', '8000', 'pipe:1'],
+                input=data, capture_output=True, timeout=25, check=True)
+            raw = result.stdout
+            count = len(raw) // 2
+            samples = memoryview(raw[:count*2]).cast('h')
+            return [max((abs(samples[j]) for j in range(i*count//bins, (i+1)*count//bins)), default=0)/32768
+                    for i in range(bins)] if count else []
+        if suffix == '.wav':
+            with wave.open(io.BytesIO(data)) as w:
+                raw = w.readframes(w.getnframes())
+                if w.getsampwidth() != 2:
+                    return []
+                samples = memoryview(raw).cast('h')
+                count = len(samples)
+                return [max((abs(samples[j]) for j in range(i*count//bins, (i+1)*count//bins)), default=0)/32768
+                        for i in range(bins)] if count else []
+    except (ValueError, OSError, subprocess.SubprocessError, wave.Error):
+        pass
+    return []
+
+
+class AudioWaveform(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.peaks = []
+        self.position = 0
+        self.setMinimumHeight(42)
+        self.setMaximumHeight(58)
+        self.setToolTip('Click the waveform to seek to an animation frame')
+        self.on_seek = None
+
+    def mousePressEvent(self, event):
+        if self.on_seek and event.button() == Qt.MouseButton.LeftButton:
+            self.on_seek(max(0., min(1., event.position().x() / max(1, self.width()))))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor('#253b42'))
+        if self.peaks:
+            painter.setPen(QPen(QColor('#85cfc8'), 1))
+            mid, amp = self.height() / 2, self.height() * .44
+            for i, peak in enumerate(self.peaks):
+                x = round(i * (self.width() - 1) / max(1, len(self.peaks) - 1))
+                height = max(1, peak * amp)
+                painter.drawLine(QPointF(x, mid-height), QPointF(x, mid+height))
+        painter.setPen(QPen(QColor('#f4bc66'), 2))
+        x = round(self.position * max(1, self.width() - 1))
+        painter.drawLine(x, 0, x, self.height())
+        painter.end()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1942,7 +2028,15 @@ class MainWindow(QMainWindow):
         self.play_timer.timeout.connect(self._playback_tick)
         self.play_clock = QElapsedTimer()
         self.play_start_frame = 0
+        self._last_audio_loop = 0
         self._refreshing_frames = False
+        self.audio_player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.audio_player.setAudioOutput(self.audio_output)
+        self.audio_temp = tempfile.TemporaryDirectory(prefix='las-audio-')
+        self.audio_mute = False
+        self.focus_mode = False
+        self.focus_restore = {}
         root = QWidget()
         vertical = QVBoxLayout(root)
         toolbar = QHBoxLayout()
@@ -1977,7 +2071,9 @@ class MainWindow(QMainWindow):
         button('Close', self.close_project)
         button('Save .las', self.save_project)
         button('Export PNG', self.export_png)
-        vertical.addLayout(toolbar)
+        self.top_toolbar = QWidget()
+        self.top_toolbar.setLayout(toolbar)
+        vertical.addWidget(self.top_toolbar)
 
         content = QHBoxLayout()
         left_panel = QWidget()
@@ -2085,6 +2181,7 @@ class MainWindow(QMainWindow):
         settings_scroll.setMinimumWidth(160)
         settings_scroll.setMaximumWidth(250)
         settings_scroll.setWidget(left_panel)
+        self.settings_scroll = settings_scroll
         content.addWidget(settings_scroll)
 
         scroll = PannableScrollArea()
@@ -2123,7 +2220,9 @@ class MainWindow(QMainWindow):
         self.opacity_input.valueChanged.connect(self.canvas.set_opacity)
         self.opacity_input.editingFinished.connect(self.return_canvas_focus)
         right.addWidget(self.opacity_input)
-        content.addLayout(right)
+        self.right_panel = QWidget()
+        self.right_panel.setLayout(right)
+        content.addWidget(self.right_panel)
         self.workspace = QWidget()
         self.workspace.setLayout(content)
         vertical.addWidget(self.workspace, 1)
@@ -2237,6 +2336,28 @@ class MainWindow(QMainWindow):
         self.onion_next_input.valueChanged.connect(lambda value: self.change_onion_range('next', value))
         ranges.addWidget(self.onion_next_input)
         timeline.addLayout(ranges)
+        audio_controls = QHBoxLayout()
+        self.audio_import_button = QPushButton('Import Audio WAV/MP3')
+        self.audio_import_button.clicked.connect(self.import_audio)
+        audio_controls.addWidget(self.audio_import_button)
+        self.audio_remove_button = QPushButton('Remove Audio')
+        self.audio_remove_button.clicked.connect(self.remove_audio)
+        audio_controls.addWidget(self.audio_remove_button)
+        self.audio_label = QLabel('No audio imported')
+        audio_controls.addWidget(self.audio_label)
+        self.audio_mute_checkbox = QCheckBox('Mute')
+        self.audio_mute_checkbox.toggled.connect(self.set_audio_mute)
+        audio_controls.addWidget(self.audio_mute_checkbox)
+        audio_controls.addWidget(QLabel('Volume'))
+        self.audio_volume = QSpinBox()
+        self.audio_volume.setRange(0, 100)
+        self.audio_volume.setValue(100)
+        self.audio_volume.valueChanged.connect(lambda v: self.audio_output.setVolume(v / 100))
+        audio_controls.addWidget(self.audio_volume)
+        timeline.addLayout(audio_controls)
+        self.audio_wave = AudioWaveform()
+        self.audio_wave.on_seek = self.seek_audio_fraction
+        timeline.addWidget(self.audio_wave)
         motion_controls = QHBoxLayout()
         self.motion_create = QPushButton('Make Motion Object from Layer')
         self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
@@ -2314,7 +2435,7 @@ class MainWindow(QMainWindow):
                         ('Ctrl++', lambda: self.adjust_zoom(1.25)),
                         ('Ctrl+=', lambda: self.adjust_zoom(1.25)),
                         ('Ctrl+-', lambda: self.adjust_zoom(0.8)),
-                        ('Ctrl+0', self.fit_zoom)]:
+                        ('Ctrl+0', self.fit_zoom), ('Tab', self.toggle_focus_mode)]:
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
@@ -2386,7 +2507,11 @@ class MainWindow(QMainWindow):
         if self.canvas.drawing or self.canvas.drag_origin is not None:
             return
         self.canvas.playing = True
+        if getattr(self.canvas, 'audio_bytes', None):
+            self.audio_player.setPosition(round(self.canvas.frame_index * 1000 / self.canvas.fps))
+            self.audio_player.play()
         self.play_start_frame = self.canvas.frame_index
+        self._last_audio_loop = 0
         self.play_clock.start()
         self.play_timer.start()
         self.play_button.setText('Ⅱ Pause')
@@ -2403,11 +2528,18 @@ class MainWindow(QMainWindow):
             self.pause_playback()
             return
         index = absolute_frame % count
+        loops = absolute_frame // count
+        if loops != self._last_audio_loop:
+            self._last_audio_loop = loops
+            if getattr(self.canvas, 'audio_bytes', None):
+                self.audio_player.setPosition(0)
+                self.audio_player.play()
         if index != self.canvas.frame_index:
             self.canvas.change_frame(index, playback=True)
 
     def pause_playback(self):
         self.play_timer.stop()
+        self.audio_player.pause()
         self.canvas.playing = False
         self.play_button.setText('▶ Play')
         self.canvas.update()
@@ -2415,6 +2547,7 @@ class MainWindow(QMainWindow):
     def stop_playback(self):
         self.pause_playback()
         self.canvas.change_frame(0, playback=True)
+        self.audio_player.setPosition(0)
 
     def activate_motion_transform(self):
         if self.canvas.begin_transform(motion=True):
@@ -2452,6 +2585,27 @@ class MainWindow(QMainWindow):
         if self.canvas.fps != fps:
             self.canvas.fps = fps
             self.canvas._mark_dirty()
+
+    def toggle_focus_mode(self):
+        if not self.project_active:
+            return
+        if not self.focus_mode:
+            self.focus_restore = {w: w.isVisible() for w in
+                (self.top_toolbar, self.settings_scroll, self.right_panel,
+                 self.timeline_container, self.timeline_toggle, self.status)}
+            for widget in self.focus_restore:
+                widget.hide()
+            self.focus_mode = True
+        else:
+            for widget, was_visible in self.focus_restore.items():
+                widget.setVisible(was_visible)
+            self.focus_restore = {}
+            self.focus_mode = False
+        self.canvas.setFocus()
+
+    def _exit_focus_mode(self):
+        if self.focus_mode:
+            self.toggle_focus_mode()
 
     def toggle_timeline(self):
         visible = not self.timeline_container.isVisible()
@@ -2503,6 +2657,7 @@ class MainWindow(QMainWindow):
         self.track_visualization.setText('   '.join(rows) + '\n◆ key   ━ held   ↗ linked   · empty   ═ static   [ ] playhead')
 
     def refresh_playhead(self, index):
+        self._audio_frame_update(index)
         self.frame_list.blockSignals(True)
         self.frame_list.setCurrentRow(index)
         self.frame_list.blockSignals(False)
@@ -2792,6 +2947,7 @@ class MainWindow(QMainWindow):
             self.set_tool('brush')
 
     def _set_project_active(self, active):
+        self._exit_focus_mode()
         self.project_active = active
         self.workspace.setVisible(active)
         self.welcome.setVisible(not active)
@@ -2827,6 +2983,7 @@ class MainWindow(QMainWindow):
             return
         self.pause_playback()
         self.canvas.reset_document(width, height)
+        self._reset_audio()
         self.project_path = None
         self._set_project_active(True)
         self.status.setText('New unsaved project')
@@ -2837,6 +2994,7 @@ class MainWindow(QMainWindow):
             return
         self.pause_playback()
         self.canvas.reset_document()
+        self._reset_audio()
         self.project_path = None
         self._set_project_active(False)
         self.status.setText('No project open')
@@ -2849,6 +3007,7 @@ class MainWindow(QMainWindow):
         self.pause_playback()
         try:
             self.canvas.load_project(path)
+            self._reload_audio()
             self.project_path = path
             self._set_project_active(True)
             self.status.setText(f'Opened: {path}')
@@ -2882,6 +3041,78 @@ class MainWindow(QMainWindow):
         if not self.project_active:
             return False
         return self._save_to(self.project_path) if self.project_path else self.save_project_as()
+
+    def _reset_audio(self):
+        self.audio_player.stop()
+        self.audio_player.setSource(QUrl())
+        self.canvas.audio_bytes = None
+        self.canvas.audio_name = ''
+        self.canvas.audio_suffix = ''
+        self.audio_wave.peaks = []
+        self.audio_wave.position = 0
+        self.audio_wave.update()
+        self.audio_label.setText('No audio imported')
+
+    def _reload_audio(self):
+        self.audio_player.stop()
+        self.audio_player.setSource(QUrl())
+        data = getattr(self.canvas, 'audio_bytes', None)
+        if not data:
+            self.audio_wave.peaks = []
+            self.audio_label.setText('No audio imported')
+        else:
+            suffix = self.canvas.audio_suffix
+            file = Path(self.audio_temp.name) / ('imported_audio' + suffix)
+            file.write_bytes(data)
+            self.audio_player.setSource(QUrl.fromLocalFile(str(file)))
+            self.audio_wave.peaks = audio_waveform(data, suffix)
+            self.audio_label.setText(self.canvas.audio_name)
+        self.audio_wave.update()
+
+    def import_audio(self):
+        if not self.project_active:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Import timeline audio',
+            str(Path.home()), 'Audio (*.wav *.mp3)')
+        if not path:
+            return
+        try:
+            file = Path(path)
+            if file.suffix.lower() not in ('.wav', '.mp3'):
+                raise ValueError('Only WAV and MP3 supported')
+            if file.stat().st_size > 80 * 1024 * 1024:
+                raise ValueError('Audio must be less than 80 MB')
+            data = file.read_bytes()
+            if not data:
+                raise ValueError('Audio file is empty')
+            self.pause_playback()
+            self.canvas.audio_bytes = data
+            self.canvas.audio_name = file.name
+            self.canvas.audio_suffix = file.suffix.lower()
+            self._reload_audio()
+            self.canvas._mark_dirty()
+        except Exception as exc:
+            QMessageBox.critical(self, 'Audio import failed', str(exc))
+
+    def remove_audio(self):
+        if getattr(self.canvas, 'audio_bytes', None):
+            self.pause_playback()
+            self._reset_audio()
+            self.canvas._mark_dirty()
+
+    def set_audio_mute(self, checked):
+        self.audio_output.setMuted(bool(checked))
+
+    def seek_audio_fraction(self, fraction):
+        count = len(self.canvas.frames)
+        frame = min(count-1, round(fraction * count))
+        self.canvas.change_frame(frame)
+
+    def _audio_frame_update(self, index):
+        self.audio_wave.position = index / max(1, len(self.canvas.frames) - 1)
+        self.audio_wave.update()
+        if not self.canvas.playing and getattr(self.canvas, 'audio_bytes', None):
+            self.audio_player.setPosition(round(index * 1000 / self.canvas.fps))
 
     def import_image_layer(self):
         if not self.project_active:
@@ -3015,9 +3246,15 @@ class MainWindow(QMainWindow):
                     progress.setRange(0, 0)
                     crf = [18, 23, 28][quality.currentIndex()]
                     command = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
-                               '-framerate', str(output_fps), '-i', str(folder / 'frame_%06d.png'),
-                               '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(crf),
-                               '-movflags', '+faststart', destination]
+                               '-framerate', str(output_fps), '-i', str(folder / 'frame_%06d.png')]
+                    if getattr(self.canvas, 'audio_bytes', None):
+                        audio_path = folder / ('audio_input' + self.canvas.audio_suffix)
+                        audio_path.write_bytes(self.canvas.audio_bytes)
+                        command += ['-i', str(audio_path)]
+                    command += ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(crf)]
+                    if getattr(self.canvas, 'audio_bytes', None):
+                        command += ['-c:a', 'aac', '-b:a', '192k', '-af', 'apad', '-shortest']
+                    command += ['-movflags', '+faststart', destination]
                     process = subprocess.Popen(command, stdout=subprocess.DEVNULL,
                                                stderr=subprocess.PIPE)
                     while process.poll() is None:
@@ -3044,6 +3281,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.pause_playback()
         if self._confirm_discard():
+            self.audio_temp.cleanup()
             event.accept()
         else:
             event.ignore()
