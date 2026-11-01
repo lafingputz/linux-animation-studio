@@ -1,44 +1,31 @@
-# Linux Animation Studio v0.21.0 (test build)
+# Linux Animation Studio v0.21.1
 
-Python/PySide6 frame-by-frame drawing and animation for Linux, retaining the v0.20 embedded audio, lasso, brush, Wacom pan, linked cel, exposure, and Canvas Focus features.
+Targeted usability update based on v0.21.0; no changes to `.las` project format (remains v6).
 
-## Changes
+## Improvements
+- Frame thumbnails now have a **visible turquoise grip with three white lines** at their right edge. Drag this grip onto a later visible frame to extend its exposure. A hover tooltip and a short timeline hint explain the gesture.
+- Adds **⏮ First** and **Last ⏭** buttons to the frame navigation row.
+- Default customizable shortcuts: **`<` (Shift+comma)** for first frame, **`>` (Shift+period)** for last frame. Existing `,` and `.` previous/next shortcuts are preserved.
+- Jumping to first/last frame pauses playback and follows existing `change_frame` audio seeking, onion-skin, and current-cel updates.
+- Title bar and About show **v0.21.1**.
 
-- Central `APP_VERSION` constant and **Help > About** version information (fixes previous stale title).
-- Timeline details organized into **Cels**, **Onion Skins**, **Audio**, and **Motion** tabs. Transport and frame thumbnails stay in the timeline view.
-- **Extend Hold To Frame…** for exact endpoints; the rightmost 12 pixels of a frame thumbnail act as an exposure drag handle. Drag rightward to a later visible frame; stops safely rather than overwriting independent artwork. For endpoints beyond visible frames, use the exact-frame command (up to frame 120).
-- **Shift+click** selects a range of frame thumbnails; **Ctrl+click** toggles individual frames. **Apply to Selected Frames…** in Cels tab can link selected empty frames to the playhead cel, unlink, or break into independent cels. Batch changes are a single undo step.
-- **Edit > Keyboard Shortcuts…**: configurable non-file-menu commands with conflict checking, reserved Space for pen panning, restore defaults, and persistent `QSettings` preferences. File commands remain predefined in this version.
-- `.las` format remains v6; existing projects should be preserved. Back up important files prior to testing.
+## Notes
+- Exposure dragging extends only to a **visible later thumbnail**. For an exact destination frame or longer holds, use **Extend Hold To Frame…**.
+- Extending holds does not silently overwrite an independent occupied cel.
+- All existing v0.21 features, keyboard preferences, .las v1–v6 loading, audio embedding, Wacom pan, drawing tools, and exports are retained.
+- The Qt GUI and Wacom interactions still require testing on the Surface Pro 3.
 
-## Run
+## Testing
+1. Verify the turquoise grip appears on the **right edge** of thumbnails and is comfortably clickable.
+2. Drag from frame 35 to 40; verify the hold extends to 40 and that undo/redo work.
+3. Verify occupied cel protection.
+4. Test `<`, `>`, `,`, `.`, including playback pause and audio seek.
+5. Remap First/Last Frame shortcuts, restart, and verify persistence.
+6. Verify compact timeline, Focus Mode, Wacom pan, audio and exports remain functional.
 
-From the existing repository on the Surface:
-
+## Launch
 ```bash
 cd ~/Projects/linux-animation-studio
-git pull --ff-only
 source .venv/bin/activate
 python main.py
 ```
-
-Requirements: PySide6, and FFmpeg available on PATH for MP3 waveform extraction and MP4 exporting.
-
-## Suggested acceptance checks
-
-1. Window title and Help > About say v0.21.0.
-2. Tabs make audio and cel controls accessible without hiding the timeline thumbnails.
-3. Drag the right edge of frame 35's thumbnail to frame 40 (with that layer's intervening cels empty), then edit the source drawing.
-4. Test Extend Hold To Frame with an exact target, an occupied frame, and undo/redo.
-5. Shift-click and Ctrl-click thumbnail selections; batch link, unlink, and break operations. Test undo/redo and project save/reopen.
-6. Remap `P` to another unused shortcut, test playback, restart, and confirm persistence; test conflict prevention and restore defaults.
-7. Verify Tab focus mode, Space+Wacom pan, pressure drawing, lasso tools, audio import/playback/waveform, exposure cels, older `.las` files, and MP4 export.
-
-## Known limits and caution
-
-- This is an experimental test build. Python syntax was checked; live PySide6/Wayland/Wacom and audio behavior were not testable in the build environment.
-- The frame strip provides an end-handle drag to later *visible* frames. Shortening existing exposures by dragging left and auto-scrolling during drag are not yet implemented.
-- Batch cel operations work on the **active animated layer**; bulk painting/erasing/transforms are deferred.
-- Shortcut customization covers canvas/timeline commands in the preferences dialog, not File-menu commands, native tablet gestures, or Space+drag. Drag recording and profile import/export are not included.
-- Deep multi-module refactoring is deferred to a dedicated follow-up to limit regressions.
-- Waveform is still click-to-seek, not continuous audible scrub.

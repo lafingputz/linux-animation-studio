@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.21: timeline workflow and shortcut preferences."""
+"""Linux Animation Studio v0.21.1: visible exposure grips and end navigation."""
 import io
 import wave
 import time
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
 )
 
-APP_VERSION = "0.21.0"
+APP_VERSION = "0.21.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2019,26 +2019,67 @@ class AudioWaveform(QWidget):
 
 
 class ExposureFrameList(QListWidget):
-    """Frame strip with a small right-edge exposure drag handle.
+    """Frame strip with conspicuous drag grips on thumbnail right edges.
 
-    The drag is only armed when the pointer starts in the final 12px of a
-    thumbnail. Ordinary clicks and Shift/Ctrl selection remain QListWidget's.
+    Click the colored grip and drag it onto a later thumbnail to extend
+    an exposure. Normal clicks and modifier selections remain native Qt.
     """
+    GRIP_WIDTH = 19
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.on_exposure_drag = None
         self._drag_source = None
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self.setToolTip('Drag the turquoise grip at a frame’s right edge to extend its hold.')
+
+    def _handle_rect(self, item):
+        rect = self.visualItemRect(item)
+        return QRect(rect.right() - self.GRIP_WIDTH + 1, rect.top() + 3,
+                     self.GRIP_WIDTH, max(8, rect.height() - 6))
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        for row in range(self.count()):
+            item = self.item(row)
+            rect = self.visualItemRect(item)
+            if not rect.isValid() or not rect.intersects(self.viewport().rect()):
+                continue
+            handle = self._handle_rect(item)
+            active = self._drag_source == row
+            painter.fillRect(handle, QColor('#176f75') if active else QColor('#328f98'))
+            painter.setPen(QPen(QColor('#f7fcfd'), 2))
+            # A visible grip, independent of frame thumbnail artwork.
+            cx, cy = handle.center().x(), handle.center().y()
+            for dx in (-4, 0, 4):
+                painter.drawLine(cx + dx, cy - 8, cx + dx, cy + 8)
+        painter.end()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_source is not None:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.viewport().update()
+            event.accept()
+            return
+        item = self.itemAt(event.position().toPoint())
+        if item is not None and self._handle_rect(item).contains(event.position().toPoint()):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            self.setToolTip(f'Drag grip on frame {self.row(item) + 1} to a later frame to extend its hold')
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and not event.modifiers():
             item = self.itemAt(event.position().toPoint())
-            if item is not None:
-                rect = self.visualItemRect(item)
-                if rect.right() - 12 <= event.position().x() <= rect.right():
-                    self._drag_source = self.row(item)
-                    self.setCursor(Qt.CursorShape.SizeHorCursor)
-                    event.accept()
-                    return
+            if item is not None and self._handle_rect(item).contains(event.position().toPoint()):
+                self._drag_source = self.row(item)
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+                self.viewport().update()
+                event.accept()
+                return
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -2047,11 +2088,17 @@ class ExposureFrameList(QListWidget):
             self._drag_source = None
             self.unsetCursor()
             target = self.itemAt(event.position().toPoint())
+            self.viewport().update()
             if target is not None and self.on_exposure_drag:
                 self.on_exposure_drag(source, self.row(target))
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        if self._drag_source is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -2305,8 +2352,10 @@ class MainWindow(QMainWindow):
         timeline_tabs.addTab(audio_page, "Audio")
         timeline_tabs.addTab(motion_page, "Motion")
         frame_controls = QHBoxLayout()
-        for label, func in [('Previous', lambda: self.canvas.change_frame(self.canvas.frame_index-1)),
+        for label, func in [('⏮ First', lambda: self.go_to_end_frame(first=True)),
+                            ('Previous', lambda: self.canvas.change_frame(self.canvas.frame_index-1)),
                             ('Next', lambda: self.canvas.change_frame(self.canvas.frame_index+1)),
+                            ('Last ⏭', lambda: self.go_to_end_frame(first=False)),
                             ('+ Blank', lambda: self.canvas.add_frame(False)),
                             ('Duplicate', lambda: self.canvas.add_frame(True)),
                             ('Delete', self.canvas.delete_frame)]:
@@ -2452,6 +2501,9 @@ class MainWindow(QMainWindow):
         self.frame_list.setSpacing(5)
         self.frame_list.currentRowChanged.connect(self._timeline_current_changed)
         self.frame_list.itemSelectionChanged.connect(self._timeline_selection_changed)
+        grip_hint = QLabel('Hold exposure: drag the turquoise grip at the right edge of a frame onto a later frame.')
+        grip_hint.setStyleSheet('color: #328f98; font-size: 10px;')
+        timeline.addWidget(grip_hint)
         timeline.addWidget(self.frame_list)
         timeline.addWidget(timeline_tabs)
         # A visible horizontal frame strip; audio/cel controls remain in tabs.
@@ -2497,6 +2549,8 @@ class MainWindow(QMainWindow):
             ('Deselect', 'Ctrl+D', self.canvas.deselect),
             ('Previous Frame', ',', lambda: self.navigate_frame(-1)),
             ('Next Frame', '.', lambda: self.navigate_frame(1)),
+            ('First Frame', '<', lambda: self.go_to_end_frame(first=True)),
+            ('Last Frame', '>', lambda: self.go_to_end_frame(first=False)),
             ('Play/Pause', 'P', self.toggle_playback),
             ('Zoom In', 'Ctrl++', lambda: self.adjust_zoom(1.25)),
             ('Zoom In Alternative', 'Ctrl+=', lambda: self.adjust_zoom(1.25)),
@@ -2557,6 +2611,15 @@ class MainWindow(QMainWindow):
     def navigate_frame(self, delta):
         if not self.canvas.playing:
             self.canvas.change_frame(self.canvas.frame_index + delta)
+
+    def go_to_end_frame(self, first=True):
+        if not self.project_active or not self.canvas.frames:
+            return
+        if self.canvas.playing:
+            self.pause_playback()
+        target = 0 if first else len(self.canvas.frames) - 1
+        self.canvas.change_frame(target)
+        # change_frame synchronizes both the timeline playhead and audio seek.
 
     def set_loop(self, enabled):
         self.canvas.loop_playback = enabled
