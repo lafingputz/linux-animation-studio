@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.20: embedded audio and canvas focus mode."""
+"""Linux Animation Studio v0.21: timeline workflow and shortcut preferences."""
 import io
 import wave
 import time
@@ -16,15 +16,16 @@ from dataclasses import dataclass, field
 from bisect import bisect_left
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
+from PySide6.QtCore import QSettings, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
 )
 
+APP_VERSION = "0.21.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2017,6 +2018,41 @@ class AudioWaveform(QWidget):
         painter.end()
 
 
+class ExposureFrameList(QListWidget):
+    """Frame strip with a small right-edge exposure drag handle.
+
+    The drag is only armed when the pointer starts in the final 12px of a
+    thumbnail. Ordinary clicks and Shift/Ctrl selection remain QListWidget's.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.on_exposure_drag = None
+        self._drag_source = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and not event.modifiers():
+            item = self.itemAt(event.position().toPoint())
+            if item is not None:
+                rect = self.visualItemRect(item)
+                if rect.right() - 12 <= event.position().x() <= rect.right():
+                    self._drag_source = self.row(item)
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_source is not None:
+            source = self._drag_source
+            self._drag_source = None
+            self.unsetCursor()
+            target = self.itemAt(event.position().toPoint())
+            if target is not None and self.on_exposure_drag:
+                self.on_exposure_drag(source, self.row(target))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2037,6 +2073,9 @@ class MainWindow(QMainWindow):
         self.audio_mute = False
         self.focus_mode = False
         self.focus_restore = {}
+        self.preferences = QSettings("LinuxAnimationStudio", "LinuxAnimationStudio")
+        self.custom_shortcuts = {}
+        self.timeline_selected_frames = []
         root = QWidget()
         vertical = QVBoxLayout(root)
         toolbar = QHBoxLayout()
@@ -2255,6 +2294,16 @@ class MainWindow(QMainWindow):
         self.timeline_content = QWidget()
         timeline = QVBoxLayout(self.timeline_content)
         timeline.setContentsMargins(4, 3, 4, 3)
+        # High-frequency transport stays outside the scrolling detail panels.
+        timeline_tabs = QTabWidget()
+        cel_page = QWidget(); cel_page_layout = QVBoxLayout(cel_page)
+        onion_page = QWidget(); onion_page_layout = QVBoxLayout(onion_page)
+        audio_page = QWidget(); audio_page_layout = QVBoxLayout(audio_page)
+        motion_page = QWidget(); motion_page_layout = QVBoxLayout(motion_page)
+        timeline_tabs.addTab(cel_page, "Cels")
+        timeline_tabs.addTab(onion_page, "Onion Skins")
+        timeline_tabs.addTab(audio_page, "Audio")
+        timeline_tabs.addTab(motion_page, "Motion")
         frame_controls = QHBoxLayout()
         for label, func in [('Previous', lambda: self.canvas.change_frame(self.canvas.frame_index-1)),
                             ('Next', lambda: self.canvas.change_frame(self.canvas.frame_index+1)),
@@ -2293,11 +2342,17 @@ class MainWindow(QMainWindow):
             button = QPushButton(title)
             button.clicked.connect(callback)
             cel_controls.addWidget(button)
-        timeline.addLayout(cel_controls)
+        cel_page_layout.addLayout(cel_controls)
+        exact = QPushButton("Extend Hold To Frame…")
+        exact.clicked.connect(self.extend_hold_to_frame)
+        cel_page_layout.addWidget(exact)
+        self.batch_menu_button = QPushButton("Apply to Selected Frames…")
+        self.batch_menu_button.clicked.connect(self.batch_frame_action)
+        cel_page_layout.addWidget(self.batch_menu_button)
         self.track_visualization = QLabel('Cel tracks')
         self.track_visualization.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.track_visualization.setWordWrap(True)
-        timeline.addWidget(self.track_visualization)
+        cel_page_layout.addWidget(self.track_visualization)
         play_controls = QHBoxLayout()
         self.play_button = QPushButton('▶ Play')
         self.play_button.clicked.connect(self.toggle_playback)
@@ -2335,7 +2390,7 @@ class MainWindow(QMainWindow):
         self.onion_next_input.setValue(self.canvas.onion_next)
         self.onion_next_input.valueChanged.connect(lambda value: self.change_onion_range('next', value))
         ranges.addWidget(self.onion_next_input)
-        timeline.addLayout(ranges)
+        onion_page_layout.addLayout(ranges)
         audio_controls = QHBoxLayout()
         self.audio_import_button = QPushButton('Import Audio WAV/MP3')
         self.audio_import_button.clicked.connect(self.import_audio)
@@ -2354,10 +2409,10 @@ class MainWindow(QMainWindow):
         self.audio_volume.setValue(100)
         self.audio_volume.valueChanged.connect(lambda v: self.audio_output.setVolume(v / 100))
         audio_controls.addWidget(self.audio_volume)
-        timeline.addLayout(audio_controls)
+        audio_page_layout.addLayout(audio_controls)
         self.audio_wave = AudioWaveform()
         self.audio_wave.on_seek = self.seek_audio_fraction
-        timeline.addWidget(self.audio_wave)
+        audio_page_layout.addWidget(self.audio_wave)
         motion_controls = QHBoxLayout()
         self.motion_create = QPushButton('Make Motion Object from Layer')
         self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
@@ -2384,17 +2439,23 @@ class MainWindow(QMainWindow):
         remove_key = QPushButton('Remove Keyframe')
         remove_key.clicked.connect(self.remove_motion_keyframe)
         motion_controls.addWidget(remove_key)
-        timeline.addLayout(motion_controls)
+        motion_page_layout.addLayout(motion_controls)
         self.canvas.motion_changed.connect(self.refresh_motion)
-        self.frame_list = QListWidget()
+        self.frame_list = ExposureFrameList()
+        self.frame_list.on_exposure_drag = self.drag_exposure
+        self.frame_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.frame_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.frame_list.setFlow(QListWidget.Flow.LeftToRight)
         self.frame_list.setWrapping(False)
         self.frame_list.setIconSize(__import__('PySide6.QtCore',fromlist=['QSize']).QSize(90,60))
         self.frame_list.setFixedHeight(108)
         self.frame_list.setSpacing(5)
-        self.frame_list.currentRowChanged.connect(self.canvas.change_frame)
+        self.frame_list.currentRowChanged.connect(self._timeline_current_changed)
+        self.frame_list.itemSelectionChanged.connect(self._timeline_selection_changed)
         timeline.addWidget(self.frame_list)
+        timeline.addWidget(timeline_tabs)
+        # A visible horizontal frame strip; audio/cel controls remain in tabs.
+        self.timeline_container.setMaximumHeight(290)
         self.timeline_toggle = QPushButton('Hide Animation Timeline')
         self.timeline_toggle.clicked.connect(self.toggle_timeline)
         vertical.addWidget(self.timeline_toggle)
@@ -2421,21 +2482,32 @@ class MainWindow(QMainWindow):
             action.triggered.connect(callback)
             if shortcut:
                 action.setShortcut(QKeySequence(shortcut))
+        editmenu = self.menuBar().addMenu('&Edit')
+        editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
+        helpmenu = self.menuBar().addMenu('&Help')
+        helpmenu.addAction('About Linux Animation Studio', self.show_about)
         self._set_project_active(True)
-        for seq, fn in [('Ctrl+Z', self.canvas.undo), ('Ctrl+Shift+Z', self.canvas.redo),
-                        ('Ctrl+Y', self.canvas.redo),
-                        ('[', lambda: self.adjust_brush(-1)),
-                        (']', lambda: self.adjust_brush(1)),
-                        ('Ctrl+A', self.canvas.select_all), ('Ctrl+D', self.canvas.deselect),
-                        ('Alt+Left', lambda: self.navigate_frame(-1)),
-                        ('Alt+Right', lambda: self.navigate_frame(1)),
-                        (',', lambda: self.navigate_frame(-1)),
-                        ('.', lambda: self.navigate_frame(1)),
-                        ('P', self.toggle_playback),
-                        ('Ctrl++', lambda: self.adjust_zoom(1.25)),
-                        ('Ctrl+=', lambda: self.adjust_zoom(1.25)),
-                        ('Ctrl+-', lambda: self.adjust_zoom(0.8)),
-                        ('Ctrl+0', self.fit_zoom), ('Tab', self.toggle_focus_mode)]:
+        self._shortcut_defs = [
+            ('Undo', 'Ctrl+Z', self.canvas.undo),
+            ('Redo', 'Ctrl+Shift+Z', self.canvas.redo),
+            ('Redo Alternative', 'Ctrl+Y', self.canvas.redo),
+            ('Brush Smaller', '[', lambda: self.adjust_brush(-1)),
+            ('Brush Larger', ']', lambda: self.adjust_brush(1)),
+            ('Select All', 'Ctrl+A', self.canvas.select_all),
+            ('Deselect', 'Ctrl+D', self.canvas.deselect),
+            ('Previous Frame', ',', lambda: self.navigate_frame(-1)),
+            ('Next Frame', '.', lambda: self.navigate_frame(1)),
+            ('Play/Pause', 'P', self.toggle_playback),
+            ('Zoom In', 'Ctrl++', lambda: self.adjust_zoom(1.25)),
+            ('Zoom In Alternative', 'Ctrl+=', lambda: self.adjust_zoom(1.25)),
+            ('Zoom Out', 'Ctrl+-', lambda: self.adjust_zoom(0.8)),
+            ('Fit Canvas', 'Ctrl+0', self.fit_zoom),
+            ('Canvas Focus Mode', 'Tab', self.toggle_focus_mode),
+        ]
+        self._shortcut_objects = {}
+        self._install_shortcuts()
+        # Existing alternative frame navigation remains unchanged.
+        for seq, fn in [('Alt+Left', lambda: self.navigate_frame(-1)), ('Alt+Right', lambda: self.navigate_frame(1))]:
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
@@ -2625,6 +2697,156 @@ class MainWindow(QMainWindow):
         self.canvas.update()
 
 
+    def _timeline_current_changed(self, index):
+        if index >= 0:
+            self.canvas.change_frame(index)
+
+    def _timeline_selection_changed(self):
+        self.timeline_selected_frames = sorted({i.row() for i in self.frame_list.selectedIndexes()})
+
+    def drag_exposure(self, start_index, end_index):
+        if end_index <= start_index:
+            self.status.setText('To extend an exposure, drag its right edge to a later frame.')
+            return
+        self._extend_source_through(start_index, end_index)
+
+    def _extend_source_through(self, source_index, end_index):
+        if self.canvas.playing or not self.project_active:
+            return
+        layer = self.canvas.active_layer()
+        if layer is None or layer.mode != 'animated':
+            QMessageBox.information(self, 'Exposure', 'Select an animated layer.')
+            return
+        source = next(x for x in self.canvas.frames[source_index] if x.id == layer.id)
+        for index in range(source_index + 1, min(end_index + 1, len(self.canvas.frames))):
+            target = next(x for x in self.canvas.frames[index] if x.id == layer.id)
+            if target.cel_id != source.cel_id and self.canvas._has_pixels(target.image):
+                QMessageBox.warning(self, 'Exposure',
+                    f'Frame {index + 1} contains independent artwork; nothing was overwritten.')
+                return
+        def operation():
+            while len(self.canvas.frames) <= end_index:
+                self.canvas.frames.append(self.canvas._copy_layers(self.canvas.frames[-1], duplicate=False))
+            for index in range(source_index + 1, end_index + 1):
+                target = next(x for x in self.canvas.frames[index] if x.id == layer.id)
+                target.image = source.image
+                target.cel_id = source.cel_id
+        if self.canvas._edit_timeline(operation):
+            self.refresh_frames()
+            self.status.setText(f'Exposure: frames {source_index + 1}–{end_index + 1}. Undo is available.')
+
+    def extend_hold_to_frame(self):
+        source_index = self.canvas.frame_index
+        end, ok = QInputDialog.getInt(self, 'Extend Hold To Frame',
+            f'Hold drawing on frame {source_index + 1} through frame:',
+            source_index + 2, source_index + 1, 120)
+        if ok:
+            self._extend_source_through(source_index, end - 1)
+
+    def batch_frame_action(self):
+        frames = list(self.timeline_selected_frames)
+        if not frames:
+            QMessageBox.information(self, 'Batch cels', 'Shift-click or Ctrl-click frame thumbnails to select a range.')
+            return
+        options = ['Link selected frames from current cel', 'Unlink selected frames', 'Break into independent cels']
+        action, ok = QInputDialog.getItem(self, 'Batch Cel Operation',
+            f'Operate on {len(frames)} selected frames:', options, 0, False)
+        if not ok:
+            return
+        layer = self.canvas.active_layer()
+        if layer is None or layer.mode != 'animated' or self.canvas.playing:
+            QMessageBox.warning(self, 'Batch cels', 'Select an animated layer and stop playback first.')
+            return
+        source_frame = self.canvas.frame_index
+        if action == options[0]:
+            # No batch operation silently destroys existing independent artwork.
+            source = next(x for x in self.canvas.frames[source_frame] if x.id == layer.id)
+            for index in frames:
+                target = next(x for x in self.canvas.frames[index] if x.id == layer.id)
+                if target.cel_id != source.cel_id and self.canvas._has_pixels(target.image):
+                    QMessageBox.warning(self, 'Batch cels',
+                        f'Frame {index + 1} contains independent artwork. No frames changed.')
+                    return
+        if action != options[0] and not frames:
+            return
+        def operation():
+            source = next(x for x in self.canvas.frames[source_frame] if x.id == layer.id)
+            for index in frames:
+                target = next(x for x in self.canvas.frames[index] if x.id == layer.id)
+                if action == options[0]:
+                    if index != source_frame:
+                        target.image = source.image
+                        target.cel_id = source.cel_id
+                else:
+                    target.image = target.image.copy()
+                    target.cel_id = uuid.uuid4().hex
+        if self.canvas._edit_timeline(operation):
+            self.refresh_frames()
+            self.status.setText(f'Updated {len(frames)} selected frames (undo available).')
+
+    def _install_shortcuts(self):
+        for name, default, callback in self._shortcut_defs:
+            sequence = str(self.preferences.value('shortcuts/' + name, default))
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(callback)
+            self._shortcut_objects[name] = shortcut
+
+    def show_shortcut_preferences(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Keyboard Shortcuts')
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('Enter Qt shortcut sequences (e.g. Ctrl+Shift+R). Pan remains Space+drag.'))
+        form = QFormLayout()
+        from PySide6.QtWidgets import QKeySequenceEdit
+        editors = {}
+        for name, default, _ in self._shortcut_defs:
+            edit = QKeySequenceEdit(self._shortcut_objects[name].key())
+            form.addRow(name, edit)
+            editors[name] = edit
+        form_scroll = QScrollArea()
+        form_scroll.setWidgetResizable(True)
+        inner = QWidget(); inner.setLayout(form)
+        form_scroll.setWidget(inner)
+        layout.addWidget(form_scroll)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.RestoreDefaults)
+        layout.addWidget(buttons)
+        buttons.rejected.connect(dialog.reject)
+        def restore():
+            for name, default, _ in self._shortcut_defs:
+                editors[name].setKeySequence(QKeySequence(default))
+        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(restore)
+        def save():
+            sequences = {name: edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText) for name, edit in editors.items()}
+            used = {}
+            for name, sequence in sequences.items():
+                if not sequence:
+                    continue
+                key = sequence.lower()
+                if key in used:
+                    QMessageBox.warning(dialog, 'Shortcut conflict', f'{name} conflicts with {used[key]}.')
+                    return
+                used[key] = name
+                if key in ('space', 'shift+space'):
+                    QMessageBox.warning(dialog, 'Reserved key', 'Space is reserved for canvas panning.')
+                    return
+            # File-menu shortcuts remain reserved until unified action routing.
+            reserved = {'ctrl+n','ctrl+o','ctrl+s','ctrl+shift+s','ctrl+w','ctrl+i','ctrl+e','ctrl+q'}
+            if any(seq.lower() in reserved for seq in sequences.values()):
+                QMessageBox.warning(dialog, 'Reserved shortcut', 'This shortcut is used by the File menu.')
+                return
+            for name, sequence in sequences.items():
+                self.preferences.setValue('shortcuts/' + name, sequence)
+                self._shortcut_objects[name].setKey(QKeySequence(sequence))
+            dialog.accept()
+        buttons.accepted.connect(save)
+        dialog.resize(450, 520)
+        dialog.exec()
+
+    def show_about(self):
+        QMessageBox.about(self, 'About Linux Animation Studio',
+            f'Linux Animation Studio v{APP_VERSION}\nPython / PySide6\n\n2D drawing and animation development build.')
+
     def extend_hold(self):
         if not self.canvas.hold_cel(self.hold_length.value()):
             QMessageBox.information(self, 'Exposure hold',
@@ -2706,10 +2928,10 @@ class MainWindow(QMainWindow):
 
     def refresh_title(self):
         if not self.project_active:
-            self.setWindowTitle('Linux Animation Studio v0.19 - No project open')
+            self.setWindowTitle(f'Linux Animation Studio v{APP_VERSION} - No project open')
             return
         name = Path(self.project_path).name if self.project_path else 'Untitled.las'
-        self.setWindowTitle(f'Linux Animation Studio v0.19 - {name}{" *" if self.canvas.dirty else ""}')
+        self.setWindowTitle(f'Linux Animation Studio v{APP_VERSION} - {name}{" *" if self.canvas.dirty else ""}')
 
     def refresh_layers(self):
         self.layers_list.blockSignals(True)
