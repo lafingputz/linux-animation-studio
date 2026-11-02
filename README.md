@@ -1,8 +1,8 @@
-# Linux Animation Studio v0.24.0
+# Linux Animation Studio v0.25.0
 
 First compact-interface release, built directly on the cross-platform v0.23.0 baseline.
 
-## What's new in v0.24.0
+## What's new in v0.25.0
 
 - **Canvas-first workspace:** Advanced tool settings and layer management begin collapsed, maximizing drawing room on small displays. Click **⚙ Tools** or **▤ Layers** to show/hide the existing panels. This is intentional: all controls from v0.23 remain available.
 - **Compact tool strip:** Brush, Eraser, Selection, Move, Transform, and Pan have concise toolbar buttons with tooltips; selected tool remains visibly checked. Use the small dropdown arrow attached to Brush, Eraser, or Selection for submenus.
@@ -74,3 +74,34 @@ Test the `dist/LinuxAnimationStudio` output on the **same target operating syste
 - Audible scrubbing is not implemented; waveform dragging seeks the timeline.
 - This release preserves the single-file `main.py` source architecture. Modularization remains future work.
 - `.las` format version 6 may not be readable by older app releases. Backup important projects before editing them with a development build.
+
+## v0.25.0: Brush and Eraser Libraries
+
+- The arrow next to the **Brush** icon opens **Brush Library…**, a compact category-filtered picker with illustrative preview strokes and named built-in presets (Round, Pencil, Ink, Airbrush).
+- The **Custom** category lists brushes already saved in LAS's user brush directory, with previews of their stamp tips. Brush creation, editing, and deletion remain accessible through **Advanced Settings…**.
+- The arrow next to **Eraser** opens a separate picker of four eraser size presets, with previews. Erasers retain their own diameter, independent of the current drawing brush. These are size presets, not distinct textured eraser engines.
+- Recent brush and eraser choices are saved in cross-platform QSettings preferences and restored on the next launch when the brush still exists.
+- A double-click or **OK** applies the selected item; **Cancel** closes without changing it. The real canvas engine remains unchanged. Previews are illustrative, not literal pressure simulations.
+- `.las` file format remains **version 6**.
+
+### Launch reminders (after git pull)
+
+Linux / Surface Pro 3:
+```bash
+cd ~/Projects/linux-animation-studio
+git pull --ff-only
+source .venv/bin/activate
+python main.py
+```
+Windows 11 / PowerShell (replace directory with your clone):
+```powershell
+cd 'C:\path\to\linux-animation-studio'
+git pull --ff-only
+.\.venv\Scripts\python.exe main.py
+```
+macOS / Terminal (replace directory with your clone):
+```bash
+cd /path/to/linux-animation-studio
+git pull --ff-only
+./.venv/bin/python main.py
+```

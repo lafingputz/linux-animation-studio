@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.24: compact contextual drawing interface."""
+"""Linux Animation Studio v0.25: visual brush and eraser libraries."""
 import io
 import wave
 import time
@@ -18,7 +18,7 @@ from bisect import bisect_left
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
 )
 
-APP_VERSION = "0.24.0"
+APP_VERSION = "0.25.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2689,6 +2689,16 @@ class MainWindow(QMainWindow):
         vertical.addWidget(self.status)
         self.setCentralWidget(root)
         self._build_tool_menus()
+        saved_eraser = self.preferences.value('brush_library/eraser_size', 48, type=int)
+        if 1 <= saved_eraser <= 500:
+            self.canvas.eraser_size = saved_eraser
+        saved_brush = str(self.preferences.value('brush_library/brush', 'Round'))
+        if saved_brush.startswith('custom:'):
+            index = self.custom_picker.findData(saved_brush[7:])
+            if index >= 0:
+                self.custom_picker.setCurrentIndex(index)
+        elif saved_brush in self.canvas.brush_settings:
+            self.brush_select.setCurrentText(saved_brush)
         self.refresh_layers()
         self.refresh_frames()
         self.refresh_title()
@@ -2876,31 +2886,150 @@ class MainWindow(QMainWindow):
         self.right_panel.setVisible(not self.right_panel.isVisible())
         self.return_canvas_focus()
 
+    def _brush_preview_icon(self, category, name, payload=None):
+        """Create an illustrative static sample; never mutate a real canvas cel."""
+        image = QImage(228, 56, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor('#f3f3f0'))
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if category == 'Custom' and payload in self.canvas.custom_brushes:
+            tip = self.canvas.custom_brushes[payload]['tip']
+            if not tip.isNull():
+                for i in range(8):
+                    x, y = 17 + i * 26, 27 + round(6 * math.sin(i * .85))
+                    painter.drawImage(QRect(x-13, y-13, 26, 26), tip)
+        else:
+            if category == 'Erasers':
+                widths = {'Small eraser': 4, 'Medium eraser': 10,
+                          'Large eraser': 17, 'Extra large eraser': 24}
+                width = widths.get(name, 9)
+            else:
+                width = {'Round': 9, 'Pencil': 3, 'Ink': 6, 'Airbrush': 19}.get(name, 7)
+            color = QColor('#343a46')
+            if name == 'Pencil': color.setAlpha(145)
+            if name == 'Airbrush': color.setAlpha(70)
+            if category == 'Erasers': color = QColor('#8795aa')
+            painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            path = QPainterPath(QPointF(13, 33))
+            path.cubicTo(52, 8, 74, 49, 116, 25)
+            path.cubicTo(152, 5, 186, 41, 213, 22)
+            painter.drawPath(path)
+        painter.end()
+        return QIcon(QPixmap.fromImage(image))
+
+    def _open_brush_library(self, eraser=False):
+        """A compact, category-filtered library using existing brush state."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Eraser Library' if eraser else 'Brush Library')
+        dialog.setMinimumWidth(330)
+        dialog.resize(390, 440)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel('Choose an eraser size' if eraser else 'Choose a brush')
+        layout.addWidget(heading)
+        category_picker = QComboBox(dialog)
+        if eraser:
+            category_picker.addItem('Erasers')
+        else:
+            for name in ('All Brushes', 'Drawing', 'Sketching', 'Painting', 'Custom'):
+                category_picker.addItem(name)
+        layout.addWidget(category_picker)
+        brushes = QListWidget(dialog)
+        brushes.setIconSize(__import__('PySide6.QtCore', fromlist=['QSize']).QSize(170, 42))
+        brushes.setSpacing(5)
+        layout.addWidget(brushes, 1)
+        explanation = QLabel('Previews are illustrative; the canvas uses your existing brush engine.')
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        edit_settings = QPushButton('Advanced Settings…', dialog)
+        buttons.addButton(edit_settings, QDialogButtonBox.ButtonRole.ActionRole)
+        layout.addWidget(buttons)
+
+        def populate():
+            brushes.clear()
+            category = category_picker.currentText()
+            if eraser:
+                choices = [('Erasers', name, size) for name, size in
+                           [('Small eraser', 15), ('Medium eraser', 45),
+                            ('Large eraser', 95), ('Extra large eraser', 175)]]
+            else:
+                choices = [('Drawing', 'Round', 'Round'),
+                           ('Sketching', 'Pencil', 'Pencil'),
+                           ('Drawing', 'Ink', 'Ink'),
+                           ('Painting', 'Airbrush', 'Airbrush')]
+                choices += [('Custom', brush['name'], ident) for ident, brush in
+                            sorted(self.canvas.custom_brushes.items(),
+                                   key=lambda pair: pair[1]['name'].lower())]
+            for group, name, value in choices:
+                if category not in ('All Brushes', group, 'Erasers'):
+                    continue
+                item = QListWidgetItem(self._brush_preview_icon(group, name, value),
+                                       name + (f'  ·  {value} px' if eraser else ''))
+                item.setData(Qt.ItemDataRole.UserRole, (group, value))
+                brushes.addItem(item)
+                if eraser and value == self.canvas.eraser_size:
+                    brushes.setCurrentItem(item)
+                elif not eraser and ((group == 'Custom' and value == self.canvas.active_custom_brush) or
+                        (group != 'Custom' and self.canvas.active_custom_brush is None and value == self.canvas.brush_preset)):
+                    brushes.setCurrentItem(item)
+            if brushes.currentItem() is None and brushes.count():
+                brushes.setCurrentRow(0)
+
+        def accept_selected():
+            item = brushes.currentItem()
+            if item is None: return
+            group, value = item.data(Qt.ItemDataRole.UserRole)
+            if eraser:
+                self._quick_eraser(value)
+                self.preferences.setValue('brush_library/eraser_size', value)
+            elif group == 'Custom':
+                index = self.custom_picker.findData(value)
+                if index >= 0:
+                    self.custom_picker.setCurrentIndex(index)
+                    self.set_tool('brush')
+                    self.preferences.setValue('brush_library/brush', 'custom:' + value)
+            else:
+                self._quick_brush(value)
+                self.preferences.setValue('brush_library/brush', value)
+            dialog.accept()
+
+        category_picker.currentIndexChanged.connect(populate)
+        brushes.itemDoubleClicked.connect(lambda item: accept_selected())
+        buttons.accepted.connect(accept_selected)
+        buttons.rejected.connect(dialog.reject)
+        def show_advanced():
+            dialog.reject()
+            self.settings_scroll.show()
+        edit_settings.clicked.connect(show_advanced)
+        populate()
+        dialog.exec()
+        self.return_canvas_focus()
+
     def _build_tool_menus(self):
-        """Quick sub-tools. The original controls remain in ⚙ Tools."""
+        """The tool icons stay compact; arrow opens a rich library."""
         brush_menu = QMenu(self)
-        for preset, preview in [('Round', '━━━'), ('Pencil', '┄┄┄'),
-                                ('Ink', '━━━━'), ('Airbrush', '·····')]:
-            action = brush_menu.addAction(f'{preview}   {preset}')
-            action.triggered.connect(lambda checked=False, p=preset: self._quick_brush(p))
+        action = brush_menu.addAction('Open Brush Library…')
+        action.triggered.connect(lambda: self._open_brush_library(False))
         brush_menu.addSeparator()
-        action = brush_menu.addAction('More brush settings…')
+        action = brush_menu.addAction('Advanced Brush Settings…')
         action.triggered.connect(lambda: self.settings_scroll.show())
         brush_button = self.tool_buttons['brush']
         brush_button.setMenu(brush_menu)
         brush_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        brush_button.setToolTip('Brush: click to draw; arrow opens the Brush Library')
 
         eraser_menu = QMenu(self)
-        for name, size in [('Small eraser', 15), ('Medium eraser', 45),
-                           ('Large eraser', 95), ('Extra large eraser', 175)]:
-            action = eraser_menu.addAction(f'{name} ({size} px)')
-            action.triggered.connect(lambda checked=False, n=size: self._quick_eraser(n))
+        action = eraser_menu.addAction('Open Eraser Library…')
+        action.triggered.connect(lambda: self._open_brush_library(True))
         eraser_menu.addSeparator()
-        action = eraser_menu.addAction('More eraser settings…')
+        action = eraser_menu.addAction('Advanced Eraser Settings…')
         action.triggered.connect(lambda: self.settings_scroll.show())
         eraser_button = self.tool_buttons['eraser']
         eraser_button.setMenu(eraser_menu)
         eraser_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        eraser_button.setToolTip('Eraser: click to erase; arrow opens eraser size library')
 
         selection_menu = QMenu(self)
         for name, mode in [('Rectangle', 'rectangle'), ('Freehand Lasso', 'freehand'),
