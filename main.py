@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.25.1: mouse zoom and tool shortcuts."""
+"""Linux Animation Studio v0.26: color, startup and tool feedback improvements."""
 import io
 import wave
 import time
@@ -18,15 +18,15 @@ from bisect import bisect_left
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon
+from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QLinearGradient
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.25.1"
+APP_VERSION = "0.26.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -175,7 +175,7 @@ class Canvas(QWidget):
         self.width_px, self.height_px = WIDTH, HEIGHT
         self.layers = [Layer(uuid.uuid4().hex, 'Layer 1', transparent_image())]
         self.active_id = self.layers[0].id
-        self.color = QColor('#222222')
+        self.color = QColor('#000000')
         self.size = 12
         self.custom_brushes = load_custom_brushes()
         self.active_custom_brush = None
@@ -639,7 +639,7 @@ class Canvas(QWidget):
             session['values']=vals
         self.update()
 
-    def apply_transform(self):
+    def apply_transform(self, keep_selection=False):
         session=self.transform_session
         if session is None:return
         if session['kind']=='raster':
@@ -684,6 +684,8 @@ class Canvas(QWidget):
                 values=session['values']
                 self.set_motion_key(*values)
         self.cancel_transform()
+        if session['kind'] == 'raster' and not keep_selection:
+            self.deselect()
         self.document_changed.emit()
         self.frames_changed.emit()
 
@@ -1187,7 +1189,7 @@ class Canvas(QWidget):
                 self.lasso_points.clear(); self.lasso_preview = None; self.update(); event.accept(); return
         if self.transform_session is not None:
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self.apply_transform()
+                self.apply_transform(keep_selection=bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
                 event.accept()
                 return
             if event.key() == Qt.Key.Key_Escape:
@@ -1655,6 +1657,7 @@ class Canvas(QWidget):
         return image
 
     def reset_document(self, width=WIDTH, height=HEIGHT):
+        self.color = QColor('#000000')
         self.cancel_transform()
         self.drawing = False
         self.drag_origin = None
@@ -1700,7 +1703,7 @@ class Canvas(QWidget):
                         active_frame=self.frame_index, fps=self.fps,
                         onion_enabled=self.onion_enabled, onion_opacity=self.onion_opacity,
                         onion_previous=self.onion_previous, onion_next=self.onion_next,
-                        loop_playback=getattr(self, 'loop_playback', True), frames=[], motion_objects=[],
+                        loop_playback=getattr(self, 'loop_playback', True), brush_color=self.color.name(), frames=[], motion_objects=[],
                         audio=None)
         path = Path(path)
         temporary = path.with_name(path.name + '.tmp')
@@ -1857,6 +1860,8 @@ class Canvas(QWidget):
             if not any(layer.id == active_id for layer in frames[index]):
                 active_id = frames[index][-1].id
         self.deselect()
+        stored_color = QColor(str(info.get('brush_color', '#000000')))
+        self.color = stored_color if stored_color.isValid() else QColor('#000000')
         self.width_px, self.height_px = width, height
         self.frames = frames
         self.motion_objects = motion_objects
@@ -2285,11 +2290,298 @@ class ExposureFrameList(QListWidget):
             self.unsetCursor()
         super().leaveEvent(event)
 
+
+class HSVDisc(QWidget):
+    """Compact hue ring plus square saturation/value plane (pure Qt paint)."""
+    changed = Signal(QColor)
+
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(240, 240)
+        self._color = QColor(color)
+        self._hue = max(0, self._color.hue())
+        self._sat = self._color.hsvSaturation()
+        self._value = self._color.value()
+        self._sv_cache = None
+        self._drag_mode = None
+
+    def set_color(self, color):
+        new_color = QColor(color)
+        if not new_color.isValid(): return
+        hue = new_color.hue()
+        if hue >= 0 and hue != self._hue:
+            self._hue = hue
+            self._sv_cache = None
+        self._sat, self._value = new_color.hsvSaturation(), new_color.value()
+        self._color = new_color
+        self.update()
+
+    def _emit(self):
+        self._color = QColor.fromHsv(self._hue, self._sat, self._value)
+        self.changed.emit(QColor(self._color))
+        self.update()
+
+    def _sv_image(self):
+        if self._sv_cache is None:
+            result = QImage(126, 126, QImage.Format.Format_RGB32)
+            for y in range(126):
+                v = round(255 * (1 - y / 125))
+                for x in range(126):
+                    result.setPixelColor(x, y, QColor.fromHsv(self._hue, round(255*x/125), v))
+            self._sv_cache = result
+        return self._sv_cache
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        cx, cy = 120, 120
+        for hue in range(360):
+            radians = math.radians(hue - 90)
+            painter.setPen(QPen(QColor.fromHsv(hue, 255, 255), 3))
+            painter.drawLine(QPointF(cx + 98*math.cos(radians), cy + 98*math.sin(radians)),
+                             QPointF(cx + 111*math.cos(radians), cy + 111*math.sin(radians)))
+        theta = math.radians(self._hue - 90)
+        spot = QPointF(cx + 105*math.cos(theta), cy + 105*math.sin(theta))
+        painter.setPen(QPen(QColor('#ffffff'), 2.4))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(spot, 7, 7)
+        painter.drawImage(57, 57, self._sv_image())
+        painter.setPen(QPen(QColor('#b9bec7'), 1))
+        painter.drawRect(QRect(56, 56, 127, 127))
+        select = QPointF(57 + 125 * self._sat/255, 57 + 125*(1-self._value/255))
+        painter.setPen(QPen(QColor('#ffffff') if self._value < 125 else QColor('#171c27'), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(select, 5.5, 5.5)
+        painter.end()
+
+    def _pick(self, pos, force_mode=None):
+        x, y = pos.x(), pos.y()
+        radius = math.hypot(x-120, y-120)
+        mode = force_mode or ('hue' if 89 <= radius <= 120 else 'sv' if 57 <= x <= 183 and 57 <= y <= 183 else None)
+        if mode == 'hue':
+            self._hue = round((math.degrees(math.atan2(y-120, x-120)) + 90) % 360) % 360
+            self._sv_cache = None
+        elif mode == 'sv':
+            self._sat = round(255 * max(0, min(1, (x-57)/125)))
+            self._value = round(255 * max(0, min(1, 1-(y-57)/125)))
+        else:
+            return False
+        self._emit()
+        return mode
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_mode = self._pick(event.position())
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_mode and event.buttons() & Qt.MouseButton.LeftButton:
+            self._pick(event.position(), self._drag_mode)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_mode = None
+
+
+class ColorStudioDialog(QDialog):
+    """Disc/harmony/palettes/values, with named user palettes in QSettings."""
+    def __init__(self, color, preferences, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Color Studio')
+        self.resize(350, 440)
+        self.setMinimumWidth(305)
+        self.preferences = preferences
+        self.color = QColor(color)
+        try:
+            stored = json.loads(str(preferences.value('color_studio/palettes', '{}')))
+            self.palettes = {str(k)[:45]: [v for v in vals if QColor(v).isValid()][:40]
+                             for k, vals in stored.items() if isinstance(vals, list)}
+        except (ValueError, TypeError, AttributeError):
+            self.palettes = {}
+        if not self.palettes:
+            self.palettes = {'Starter': ['#000000','#ffffff','#d44444','#f6bd4f',
+                                          '#62aa71','#438bc5','#7256a8','#d886bb']}
+        self._updating = False
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        self.chip = QLabel()
+        self.chip.setFixedSize(32, 32)
+        self.hex_edit = QLineEdit()
+        self.hex_edit.setMaxLength(7)
+        self.hex_edit.setPlaceholderText('#RRGGBB')
+        self.hex_edit.editingFinished.connect(self._hex_changed)
+        header.addWidget(self.chip)
+        header.addWidget(self.hex_edit, 1)
+        layout.addLayout(header)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+
+        disc_page = QWidget()
+        disc_layout = QVBoxLayout(disc_page)
+        self.disc = HSVDisc(self.color)
+        self.disc.changed.connect(self._set_color)
+        disc_layout.addWidget(self.disc, alignment=Qt.AlignmentFlag.AlignCenter)
+        disc_layout.addWidget(QLabel('Ring: hue    •    Square: saturation and brightness'),
+                              alignment=Qt.AlignmentFlag.AlignCenter)
+        self.tabs.addTab(disc_page, 'Disc')
+
+        harmony_page = QWidget()
+        harmony_layout = QVBoxLayout(harmony_page)
+        harmony_layout.addWidget(QLabel('Choose a harmony based on your current color:'))
+        self.harmony_type = QComboBox()
+        self.harmony_type.addItems(['Complementary','Analogous','Triadic'])
+        self.harmony_type.currentIndexChanged.connect(self._update_harmony)
+        harmony_layout.addWidget(self.harmony_type)
+        self.harmony_swatches = QHBoxLayout()
+        harmony_layout.addLayout(self.harmony_swatches)
+        harmony_layout.addStretch()
+        self.tabs.addTab(harmony_page, 'Harmony')
+
+        palette_page = QWidget()
+        palette_layout = QVBoxLayout(palette_page)
+        self.palette_choice = QComboBox()
+        self.palette_choice.addItems(sorted(self.palettes))
+        self.palette_choice.currentIndexChanged.connect(self._render_palette)
+        palette_layout.addWidget(self.palette_choice)
+        self.swatch_grid = QGridLayout()
+        palette_layout.addLayout(self.swatch_grid)
+        palette_layout.addStretch()
+        palette_commands = QHBoxLayout()
+        make = QPushButton('New palette')
+        make.clicked.connect(self._new_palette)
+        add = QPushButton('Add current color')
+        add.clicked.connect(self._save_color)
+        palette_commands.addWidget(make)
+        palette_commands.addWidget(add)
+        palette_layout.addLayout(palette_commands)
+        self.tabs.addTab(palette_page, 'Palettes')
+
+        values_page = QWidget()
+        values_layout = QFormLayout(values_page)
+        self.rgb_inputs = []
+        for channel, label in enumerate(('Red', 'Green', 'Blue')):
+            control = QSpinBox()
+            control.setRange(0, 255)
+            control.valueChanged.connect(lambda value, idx=channel: self._rgb_changed(idx, value))
+            values_layout.addRow(label, control)
+            self.rgb_inputs.append(control)
+        system_picker = QPushButton('System color picker…')
+        system_picker.clicked.connect(self._native_picker)
+        values_layout.addRow(system_picker)
+        self.tabs.addTab(values_page, 'Values')
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._set_color(self.color)
+
+    def current_color(self):
+        return QColor(self.color)
+
+    def _set_color(self, color):
+        if self._updating or not color.isValid():
+            return
+        self._updating = True
+        self.color = QColor(color)
+        self.disc.set_color(color)
+        self.chip.setStyleSheet('background-color: %s; border: 1px solid gray; border-radius: 6px;' % color.name())
+        self.hex_edit.setText(color.name().upper())
+        for spin, value in zip(self.rgb_inputs, (color.red(), color.green(), color.blue())):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self._updating = False
+        self._update_harmony()
+
+    def _hex_changed(self):
+        text = self.hex_edit.text().strip()
+        if not text.startswith('#'): text = '#' + text
+        c = QColor(text)
+        if c.isValid() and len(text) == 7:
+            self._set_color(c)
+        else:
+            self.hex_edit.setText(self.color.name().upper())
+
+    def _rgb_changed(self, index, value):
+        if not self._updating:
+            self._set_color(QColor(*(v.value() for v in self.rgb_inputs)))
+
+    def _native_picker(self):
+        color = QColorDialog.getColor(self.color, self, 'Choose a color')
+        if color.isValid(): self._set_color(color)
+
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None: item.widget().deleteLater()
+
+    def _update_harmony(self, *_):
+        self._clear_layout(self.harmony_swatches)
+        offsets = {'Complementary': [0, 180], 'Analogous': [-30, 0, 30],
+                   'Triadic': [0, 120, 240]}[self.harmony_type.currentText()]
+        base_hue = max(0, self.color.hue())
+        sat = max(60, self.color.hsvSaturation())
+        value = max(80, self.color.value())
+        for offset in offsets:
+            tone = QColor.fromHsv((base_hue + offset) % 360, sat, value)
+            button = QPushButton(tone.name().upper())
+            button.setMinimumHeight(72)
+            button.setToolTip('Use ' + tone.name().upper())
+            button.setStyleSheet('QPushButton { background:%s; color:%s; border:1px solid gray; border-radius:7px; }' %
+                                 (tone.name(), '#ffffff' if tone.value() < 170 else '#151515'))
+            button.clicked.connect(lambda checked=False, c=QColor(tone): self._set_color(c))
+            self.harmony_swatches.addWidget(button)
+
+    def _persist_palettes(self):
+        self.preferences.setValue('color_studio/palettes', json.dumps(self.palettes))
+
+    def _new_palette(self):
+        name, ok = QInputDialog.getText(self, 'New palette', 'Palette name:')
+        name = name.strip()[:45]
+        if not ok or not name: return
+        if name in self.palettes:
+            QMessageBox.information(self, 'Palette exists', 'Choose a different name.')
+            return
+        if len(self.palettes) >= 15:
+            QMessageBox.warning(self, 'Palette limit', 'Maximum 15 palettes.')
+            return
+        self.palettes[name] = []
+        self._persist_palettes()
+        self.palette_choice.addItem(name)
+        self.palette_choice.setCurrentText(name)
+        self._render_palette()
+
+    def _save_color(self):
+        name = self.palette_choice.currentText()
+        if not name: return
+        colors = self.palettes.setdefault(name, [])
+        if self.color.name() not in colors:
+            if len(colors) >= 40:
+                QMessageBox.warning(self, 'Palette full', 'Maximum 40 colors per palette.')
+                return
+            colors.append(self.color.name())
+            self._persist_palettes()
+        self._render_palette()
+
+    def _render_palette(self, *_):
+        self._clear_layout(self.swatch_grid)
+        name = self.palette_choice.currentText()
+        for i, hex_color in enumerate(self.palettes.get(name, [])):
+            button = QPushButton('')
+            button.setToolTip(hex_color.upper() + ' • click to select')
+            button.setFixedSize(43, 39)
+            button.setStyleSheet('background:%s; border:1px solid #89909b; border-radius:5px;' % hex_color)
+            button.clicked.connect(lambda checked=False, c=hex_color: self._set_color(QColor(c)))
+            self.swatch_grid.addWidget(button, i//6, i%6)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.project_path = None
-        self.project_active = True
+        self.project_active = False
         self.resize(1370, 930)
         self.play_timer = QTimer(self)
         self.play_timer.setInterval(15)
@@ -2380,13 +2672,12 @@ class MainWindow(QMainWindow):
         self.selection_mode_picker.addItem('Rectangle', 'rectangle')
         self.selection_mode_picker.addItem('Freehand Lasso', 'freehand')
         self.selection_mode_picker.addItem('Polygonal Lasso', 'polygonal')
-        self.selection_mode_picker.currentIndexChanged.connect(
-            lambda i: self.canvas.set_selection_mode(self.selection_mode_picker.itemData(i)))
+        self.selection_mode_picker.currentIndexChanged.connect(self._selection_mode_changed)
         left.addWidget(QLabel('Selection mode'))
         left.addWidget(self.selection_mode_picker)
         transform_buttons = QHBoxLayout()
         apply_button = QPushButton('Apply Transform')
-        apply_button.clicked.connect(self.canvas.apply_transform)
+        apply_button.clicked.connect(lambda: self.canvas.apply_transform(keep_selection=False))
         transform_buttons.addWidget(apply_button)
         cancel_button = QPushButton('Cancel Transform')
         cancel_button.clicked.connect(self.canvas.cancel_transform)
@@ -2764,7 +3055,8 @@ class MainWindow(QMainWindow):
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
         helpmenu = self.menuBar().addMenu('&Help')
         helpmenu.addAction('About Linux Animation Studio', self.show_about)
-        self._set_project_active(True)
+        self._set_project_active(False)
+        self._refresh_tool_icons()
         self._shortcut_defs = [
             ('Undo', 'Ctrl+Z', self.canvas.undo),
             ('Redo', 'Ctrl+Shift+Z', self.canvas.redo),
@@ -3098,6 +3390,7 @@ class MainWindow(QMainWindow):
     def _quick_eraser(self, size):
         self.set_tool('eraser')
         self.size_input.setValue(size)
+        self._refresh_tool_icons()
         self.return_canvas_focus()
 
     def _quick_selection(self, mode):
@@ -3105,6 +3398,81 @@ class MainWindow(QMainWindow):
             self.selection_mode_picker.findData(mode))
         self.set_tool('select')
         self.return_canvas_focus()
+
+    def _selection_mode_changed(self, index):
+        self.canvas.set_selection_mode(self.selection_mode_picker.itemData(index))
+        self._refresh_tool_icons()
+
+    def _small_tool_icon(self, tool):
+        """Paint a legible preset representation without adding toolbar widgets."""
+        img = QImage(34, 34, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        white = QColor('#eaf0fa')
+        painter.setPen(QPen(white, 2, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        if tool == 'select':
+            mode = self.canvas.selection_mode
+            if mode == 'rectangle':
+                painter.setPen(QPen(white, 2, Qt.PenStyle.DashLine))
+                painter.drawRect(5, 6, 24, 22)
+            elif mode == 'freehand':
+                path = QPainterPath(QPointF(8, 23))
+                path.cubicTo(3, 7, 26, 3, 25, 15)
+                path.cubicTo(28, 27, 13, 31, 8, 23)
+                painter.setPen(QPen(white, 2, Qt.PenStyle.DashLine))
+                painter.drawPath(path)
+            else:
+                painter.setPen(QPen(white, 2, Qt.PenStyle.DashLine))
+                painter.drawPolygon(QPolygonF([QPointF(7, 8), QPointF(27, 11),
+                                               QPointF(23, 28), QPointF(10, 24)]))
+        elif tool == 'brush':
+            custom = self.canvas.custom_brushes.get(self.canvas.active_custom_brush)
+            if custom is not None:
+                painter.drawImage(QRectF(7, 6, 21, 21), custom['tip'])
+            elif self.canvas.brush_preset == 'Round':
+                painter.setBrush(white); painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(QRectF(10, 9, 15, 15))
+            elif self.canvas.brush_preset == 'Pencil':
+                painter.setPen(QPen(white, 1.3))
+                for k in range(3):
+                    painter.drawLine(6+k*2, 25, 23+k, 7)
+            elif self.canvas.brush_preset == 'Ink':
+                painter.setPen(QPen(white, 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawLine(8, 25, 26, 9)
+            else:
+                for radius, alpha in [(13, 40), (10, 65), (7, 110), (4, 180)]:
+                    tint = QColor(white); tint.setAlpha(alpha)
+                    painter.setBrush(tint); painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawEllipse(QRectF(17-radius, 17-radius, radius*2, radius*2))
+        elif tool == 'eraser':
+            radius = max(3, min(12, round(self.canvas.eraser_size / 20) + 3))
+            painter.setBrush(QColor('#768799'))
+            painter.setPen(QPen(white, 1.6, Qt.PenStyle.DashLine))
+            painter.drawEllipse(QRectF(17-radius, 17-radius, radius*2, radius*2))
+            painter.setPen(QPen(white, 2))
+            painter.drawLine(22, 24, 29, 29)
+        painter.end()
+        return QIcon(QPixmap.fromImage(img))
+
+    def _refresh_tool_icons(self):
+        if not hasattr(self, 'tool_buttons') or not hasattr(self, 'canvas'):
+            return
+        for tool in ('brush', 'eraser', 'select'):
+            button = self.tool_buttons.get(tool)
+            if button is None: continue
+            button.setText('')
+            button.setIcon(self._small_tool_icon(tool))
+            button.setIconSize(__import__('PySide6.QtCore', fromlist=['QSize']).QSize(31, 31))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            if tool == 'brush':
+                name = self.canvas.custom_brushes.get(self.canvas.active_custom_brush, {}).get('name', self.canvas.brush_preset)
+                button.setToolTip(f'Brush: {name} (B; Shift+B cycles)')
+            elif tool == 'eraser':
+                button.setToolTip(f'Eraser: {self.canvas.eraser_size} px (E)')
+            else:
+                button.setToolTip(f'Selection: {self.selection_mode_picker.currentText()} (M / L / Shift+L)')
 
     def _tool_shortcut(self, tool, selection_mode=None):
         """Keyboard tool switch. Text and numeric inputs retain their keys."""
@@ -3132,12 +3500,14 @@ class MainWindow(QMainWindow):
         current = self.canvas.brush_preset if self.canvas.active_custom_brush is None else None
         index = presets.index(current) if current in presets else -1
         self._quick_brush(presets[(index + 1) % len(presets)])
+        self.status.setText('Brush: ' + self.canvas.brush_preset)
 
     def _cycle_lasso(self):
         if not self.project_active or self._shortcut_is_typing():
             return
         current = self.selection_mode_picker.currentData()
         self._quick_selection('polygonal' if current == 'freehand' else 'freehand')
+        self.status.setText('Selection: ' + self.selection_mode_picker.currentText())
 
     def set_tool(self, tool):
         old_tool = self.canvas.tool
@@ -3155,6 +3525,7 @@ class MainWindow(QMainWindow):
             self.size_input.setValue(size)
         for name, button in self.tool_buttons.items():
             button.setChecked(name == self.canvas.tool)
+        self._refresh_tool_icons()
         self.canvas_scroll.tool_changed()
 
     def adjust_brush(self, offset):
@@ -3545,6 +3916,7 @@ class MainWindow(QMainWindow):
         self.update_custom_preview()
         self.canvas._stamp_cache.clear()
         self.set_tool('brush')
+        self._refresh_tool_icons()
 
     def change_custom_dynamic(self, key, value):
         ident = self.canvas.active_custom_brush
@@ -3655,6 +4027,7 @@ class MainWindow(QMainWindow):
         self.brush_opacity.blockSignals(False)
         if self.canvas.tool != 'eraser':
             self.change_size(settings['size'])
+        self._refresh_tool_icons()
         self.return_canvas_focus()
 
     def change_brush_opacity(self, opacity):
@@ -3678,6 +4051,7 @@ class MainWindow(QMainWindow):
                 save_custom_brush(self.canvas.active_custom_brush, brush)
         self.canvas.update()
         self.canvas.refresh_cursor()
+        self._refresh_tool_icons()
 
     def update_color_swatch(self):
         color = self.canvas.color
@@ -3707,23 +4081,29 @@ class MainWindow(QMainWindow):
         self.status.setText(f'Canvas fitted: {self.canvas.zoom * 100:.0f}%')
 
     def pick_color(self):
-        color = QColorDialog.getColor(self.canvas.color, self, 'Choose brush color')
-        if color.isValid():
-            self.canvas.color = color
+        dialog = ColorStudioDialog(self.canvas.color, self.preferences, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.canvas.color = dialog.current_color()
             self.update_color_swatch()
             self.set_tool('brush')
 
     def _set_project_active(self, active):
         self._exit_focus_mode()
+        starting_project = active and not self.project_active
         self.project_active = active
         self.workspace.setVisible(active)
         self.welcome.setVisible(not active)
         self.timeline_toggle.setVisible(active)
-        self.timeline_container.setVisible(active)
-        self.timeline_toggle.setText('Hide Animation Timeline' if active else 'Show Animation Timeline')
+        # Drawing-first startup: each newly opened/created project begins with
+        # timeline collapsed; it remains available from the toggle button.
+        if starting_project or not active:
+            self.timeline_container.hide()
+        self.timeline_toggle.setText('Hide Animation Timeline' if self.timeline_container.isVisible() else 'Show Animation Timeline')
         for b in self.toolbar_buttons:
             if b.text() not in ('New', 'Open .las'):
                 b.setEnabled(active)
+        for b in self.tool_buttons.values():
+            b.setEnabled(active)
         self.refresh_title()
 
     def _confirm_discard(self):
@@ -3750,6 +4130,7 @@ class MainWindow(QMainWindow):
             return
         self.pause_playback()
         self.canvas.reset_document(width, height)
+        self.update_color_swatch()
         self._reset_audio()
         self.project_path = None
         self._set_project_active(True)
@@ -3761,6 +4142,7 @@ class MainWindow(QMainWindow):
             return
         self.pause_playback()
         self.canvas.reset_document()
+        self.update_color_swatch()
         self._reset_audio()
         self.project_path = None
         self._set_project_active(False)
@@ -3774,6 +4156,7 @@ class MainWindow(QMainWindow):
         self.pause_playback()
         try:
             self.canvas.load_project(path)
+            self.update_color_swatch()
             self._reload_audio()
             self.project_path = path
             self._set_project_active(True)
