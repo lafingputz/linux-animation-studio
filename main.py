@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.25: visual brush and eraser libraries."""
+"""Linux Animation Studio v0.25.1: mouse zoom and tool shortcuts."""
 import io
 import wave
 import time
@@ -21,12 +21,12 @@ from PySide6.QtCore import QSettings, QStandardPaths, QCoreApplication, QEvent, 
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
+    QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu,
 )
 
-APP_VERSION = "0.25.0"
+APP_VERSION = "0.25.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -1906,6 +1906,7 @@ class PannableScrollArea(QScrollArea):
         self._canvas = None
         self._pan_debug = os.environ.get('LAS_PAN_DEBUG', '').lower() in ('1', 'true', 'yes')
         self._pan_samples = 0
+        self.on_canvas_zoom = None
         self.viewport().installEventFilter(self)
         QApplication.instance().installEventFilter(self)
 
@@ -1983,8 +1984,49 @@ class PannableScrollArea(QScrollArea):
                           '->' + str((h.value(), v.value())) +
                           ' limits=' + str((h.maximum(), v.maximum())))
 
+    def _wheel_zoom(self, event):
+        """Zoom about the pointer; preserve the same canvas pixel under it."""
+        if self._canvas is None or not (event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            return False
+        steps = event.angleDelta().y() / 120.0
+        if not steps:
+            steps = event.pixelDelta().y() / 100.0
+        if not steps:
+            return False
+        before = self._canvas.zoom
+        target = max(0.25, min(8.0, before * (1.15 ** steps)))
+        if abs(target - before) < 1e-9:
+            event.accept()
+            return True
+        global_point = event.globalPosition().toPoint()
+        pointer = self.viewport().mapFromGlobal(global_point)
+        # The canvas is centered when smaller than the viewport, so use the
+        # actual widget origin instead of assuming it starts at (0, 0).
+        canvas_point = (QPointF(pointer) - QPointF(self._canvas.pos())) / before
+        self._canvas.set_zoom(target)
+        def preserve_anchor():
+            if self._canvas is None or abs(self._canvas.zoom - target) > 1e-6:
+                return
+            # Adjust scrollbars for the shift caused by resizing the canvas.
+            image_point = QPoint(round(canvas_point.x() * target),
+                                 round(canvas_point.y() * target))
+            projected = self._canvas.mapTo(self.viewport(), image_point)
+            offset = projected - pointer
+            h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+            h.setValue(h.value() + offset.x())
+            v.setValue(v.value() + offset.y())
+        QTimer.singleShot(0, preserve_anchor)
+        if self.on_canvas_zoom is not None:
+            self.on_canvas_zoom(target)
+        event.accept()
+        return True
+
     def eventFilter(self, obj, event):
         t = event.type()
+        if t == QEvent.Type.Wheel and (obj is self._canvas or obj is self.viewport()):
+            if self._wheel_zoom(event):
+                return True
         if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Space:
             if self.window().isActiveWindow():
                 if not event.isAutoRepeat():
@@ -2303,8 +2345,7 @@ class MainWindow(QMainWindow):
             ('brush', '🖌', 'Brush: click to draw, arrow for brush presets'),
             ('eraser', '⌫', 'Eraser: click to erase, arrow for size presets'),
             ('select', '▱', 'Selection: arrow for rectangle / lassos'),
-            ('move', '✥', 'Move selected pixels'),
-            ('transform', '➤', 'Transform selection or active cel'),
+            ('transform', '➤', 'Transform / move selection or active cel'),
             ('pan', '✋', 'Pan canvas')]:
             b = QToolButton()
             b.setText(label)
@@ -2433,6 +2474,7 @@ class MainWindow(QMainWindow):
         scroll = PannableScrollArea()
         self.canvas_scroll = scroll
         scroll.setWidget(self.canvas)
+        scroll.on_canvas_zoom = lambda zoom: self.status.setText(f'Canvas zoom: {zoom * 100:.0f}%')
         scroll.setWidgetResizable(False)
         scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scroll.viewport().setCursor(Qt.CursorShape.ArrowCursor)
@@ -2729,6 +2771,14 @@ class MainWindow(QMainWindow):
             ('Redo Alternative', 'Ctrl+Y', self.canvas.redo),
             ('Brush Smaller', '[', lambda: self.adjust_brush(-1)),
             ('Brush Larger', ']', lambda: self.adjust_brush(1)),
+            ('Brush Tool', 'B', lambda: self._tool_shortcut('brush')),
+            ('Cycle Brush Presets', 'Shift+B', self._cycle_brush_preset),
+            ('Eraser Tool', 'E', lambda: self._tool_shortcut('eraser')),
+            ('Rectangle Marquee', 'M', lambda: self._tool_shortcut('select', 'rectangle')),
+            ('Freehand Lasso', 'L', lambda: self._tool_shortcut('select', 'freehand')),
+            ('Cycle Lasso Tools', 'Shift+L', self._cycle_lasso),
+            ('Transform Tool', 'T', lambda: self._tool_shortcut('transform')),
+            ('Hand / Pan Tool', 'H', lambda: self._tool_shortcut('pan')),
             ('Select All', 'Ctrl+A', self.canvas.select_all),
             ('Deselect', 'Ctrl+D', self.canvas.deselect),
             ('Previous Frame', ',', lambda: self.navigate_frame(-1)),
@@ -3056,6 +3106,39 @@ class MainWindow(QMainWindow):
         self.set_tool('select')
         self.return_canvas_focus()
 
+    def _tool_shortcut(self, tool, selection_mode=None):
+        """Keyboard tool switch. Text and numeric inputs retain their keys."""
+        if not self.project_active or self._shortcut_is_typing():
+            return
+        if selection_mode is not None:
+            self._quick_selection(selection_mode)
+        else:
+            self.set_tool(tool)
+            self.return_canvas_focus()
+
+    def _shortcut_is_typing(self):
+        focus = QApplication.focusWidget()
+        if focus is None:
+            return False
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit,
+                              QAbstractSpinBox)):
+            return True
+        return isinstance(focus, QComboBox) and focus.isEditable()
+
+    def _cycle_brush_preset(self):
+        if not self.project_active or self._shortcut_is_typing():
+            return
+        presets = ['Round', 'Pencil', 'Ink', 'Airbrush']
+        current = self.canvas.brush_preset if self.canvas.active_custom_brush is None else None
+        index = presets.index(current) if current in presets else -1
+        self._quick_brush(presets[(index + 1) % len(presets)])
+
+    def _cycle_lasso(self):
+        if not self.project_active or self._shortcut_is_typing():
+            return
+        current = self.selection_mode_picker.currentData()
+        self._quick_selection('polygonal' if current == 'freehand' else 'freehand')
+
     def set_tool(self, tool):
         old_tool = self.canvas.tool
         if old_tool == 'eraser':
@@ -3248,7 +3331,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle('Keyboard Shortcuts')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('Enter Qt shortcut sequences (e.g. Ctrl+Shift+R). Pan remains Space+drag.'))
+        layout.addWidget(QLabel('Enter Qt shortcut sequences (e.g. Ctrl+Shift+R). Pan remains Space+drag. Tool letters do not act while typing.'))
         form = QFormLayout()
         from PySide6.QtWidgets import QKeySequenceEdit
         editors = {}

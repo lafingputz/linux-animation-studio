@@ -1,11 +1,11 @@
-# Linux Animation Studio v0.25.0
+# Linux Animation Studio v0.25.1
 
-First compact-interface release, built directly on the cross-platform v0.23.0 baseline.
+Mouse and keyboard usability update, built on the validated v0.25.0 brush library.
 
 ## What's new in v0.25.0
 
 - **Canvas-first workspace:** Advanced tool settings and layer management begin collapsed, maximizing drawing room on small displays. Click **⚙ Tools** or **▤ Layers** to show/hide the existing panels. This is intentional: all controls from v0.23 remain available.
-- **Compact tool strip:** Brush, Eraser, Selection, Move, Transform, and Pan have concise toolbar buttons with tooltips; selected tool remains visibly checked. Use the small dropdown arrow attached to Brush, Eraser, or Selection for submenus.
+- **Compact tool strip:** Brush, Eraser, Selection, Transform, and Pan have concise toolbar buttons with tooltips; selected tool remains visibly checked. Use the small dropdown arrow attached to Brush, Eraser, or Selection for submenus.
 - **Quick brush library:** Built-in Round, Pencil, Ink, and Airbrush presets are available from the Brush dropdown with lightweight text-based stroke samples. The full custom brush library, pressure dynamics, stamps, and detailed settings remain in **⚙ Tools**; full graphical previews are planned for the next UI milestone.
 - **Eraser presets:** Four quick eraser sizes, retaining independent brush/eraser sizing. The detailed settings panel remains available.
 - **Selection submenu:** Rectangle, Freehand Lasso, and Polygonal Lasso are available directly from a dropdown; advanced selection-related operations stay accessible.
@@ -17,12 +17,12 @@ First compact-interface release, built directly on the cross-platform v0.23.0 ba
 
 The tool buttons show a split arrow for the Brush, Eraser, and Selection submenus. Click the main portion to activate the last selected subtool; click the arrow to choose a preset or selection type. Use **⚙ Tools** for custom brush creation, tuning, transform apply/cancel, and other advanced controls. Use **▤ Layers** to show layer management. The application menu bar continues to provide File, Edit, and other functions. Tab remains Canvas Focus Mode.
 
-## Recommended v0.24 checks
+## Original compact-toolbar regression checks
 
 1. Start LAS on your Surface Pro 3, Windows Cintiq, and macOS; confirm the sidebar panels begin collapsed, and the drawing canvas has more space.
 2. Switch between Brush and Eraser; verify independent sizes and pressure behavior. Choose presets from dropdown arrows.
 3. Select Rectangle, Freehand Lasso, and Polygonal Lasso from the Selection dropdown; test drawing within each mask.
-4. Test Transform, Apply, and Cancel (the last two remain in **⚙ Tools**), Move, Pan, undo/redo, and keyboard shortcuts.
+4. Test Transform movement, Apply, and Cancel (the last two remain in **⚙ Tools**), Pan, undo/redo, and keyboard shortcuts.
 5. Open and close **⚙ Tools** and **▤ Layers**; exercise custom brush controls and layer behavior.
 6. Change the color via the swatch, save/reopen a `.las` project, then export PNG/MP4 with audio.
 7. Verify animation, exposure holds, linked cels, multi-frame editing, waveform dragging, and Focus Mode did not regress.
@@ -105,3 +105,52 @@ cd /path/to/linux-animation-studio
 git pull --ff-only
 ./.venv/bin/python main.py
 ```
+
+## v0.25.1: Mouse Zoom & Keyboard Workflows
+
+- **Ctrl+wheel / Alt+wheel** over the canvas zooms by 15% per wheel notch, constrained to the existing 25%–800% range, with the mouse pointer acting as the zoom anchor. Without modifiers the scroll area continues to scroll. Linux desktop window managers may reserve Alt+wheel, so Ctrl+wheel is the recommended fallback.
+- **Shortcut keys**, configurable through **Edit → Keyboard Shortcuts…**:
+  - `B` selects Brush; `Shift+B` cycles Round → Pencil → Ink → Airbrush, returning to Round after Airbrush.
+  - `E` selects Eraser; `M` selects Rectangle Marquee.
+  - `L` selects Freehand Lasso; `Shift+L` toggles Freehand/Polygonal Lasso.
+  - `T` selects Transform, `H` selects Hand/Pan.
+  - `Space+drag` remains temporary canvas panning, `P` playback, `,` / `.` frame navigation, `<` / `>` first/last frame, and `Ctrl+0` fit canvas.
+- Tool-key callbacks avoid switching tools while entering text or numeric values into editing widgets; custom shortcuts remain persistent and conflict-checked.
+- The **Move** button is removed from the toolbar; **Transform** handles moving artwork as well as scale/rotate. Internal Move functionality remains for compatibility, with no changes to actual transformations, undo/redo, or `.las` format v6.
+- **Mouse-wheel zoom is canvas-only** so timeline, brush library, and other scrollable panels retain normal wheel behavior.
+
+### v0.25.1 quick acceptance tests
+
+1. Test Ctrl+wheel and Alt+wheel over the canvas at several zoom levels and near canvas corners. Verify pointer-centered zoom, 25%/800% limits, and normal unmodified scrolling.
+2. Verify B, Shift+B, E, M, L, Shift+L, T, H, and visually checked tool buttons.
+3. Verify shortcut customizations persist after restart and conflicts are rejected.
+4. Type letters in a layer rename dialog and numeric inputs; they must not switch tools.
+5. Transform selected artwork and entire active cel; verify Apply/Cancel, undo/redo.
+6. Check Wacom pressure and Space+drag pan; test mouse middle-button pan where available.
+7. Regression: brush library, custom stamps, selections, linked cels, multi-frame edits, audio/MP4, projects, Windows/macOS launch.
+
+### Launch on each OS (after replacing files in GitHub and pulling)
+
+**Linux (Surface Pro 3):**
+```bash
+cd ~/Projects/linux-animation-studio
+git pull --ff-only
+source .venv/bin/activate
+python main.py
+```
+
+**Windows (PowerShell):**
+```powershell
+cd "C:\path\to\linux-animation-studio"
+git pull --ff-only
+.\.venv\Scripts\python.exe main.py
+```
+
+**macOS (M1 MacBook Air):**
+```bash
+cd /path/to/linux-animation-studio
+git pull --ff-only
+./.venv/bin/python main.py
+```
+
+macOS tablet pressure remains unverified due to the older CTH-490 driver's OS support, not a confirmed LAS regression.
