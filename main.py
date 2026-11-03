@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.26.0"
+APP_VERSION = "0.27.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2598,6 +2598,11 @@ class MainWindow(QMainWindow):
         self.focus_mode = False
         self.focus_restore = {}
         self.preferences = QSettings("LinuxAnimationStudio", "LinuxAnimationStudio")
+        # Workspace layouts are UI preferences only, never part of the .las document.
+        # Every fresh application launch begins in the uncluttered Drawing workspace.
+        self.workspace_mode = 'Drawing'
+        self._workspace_restoring = False
+        self._workspace_anchor_serial = 0
         self.custom_shortcuts = {}
         self.timeline_selected_frames = []
         root = QWidget()
@@ -2655,6 +2660,13 @@ class MainWindow(QMainWindow):
         self.color_button.setFixedSize(39, 36)
         self.update_color_swatch()
         toolbar.addStretch()
+        self.workspace_picker = QComboBox()
+        self.workspace_picker.addItems(['Drawing', 'Animation'])
+        self.workspace_picker.setToolTip('Switch workspace layout without changing the project, frame, or drawing tools')
+        self.workspace_picker.setMinimumWidth(105)
+        self.workspace_picker.setMaximumWidth(132)
+        self.workspace_picker.currentTextChanged.connect(self.change_workspace)
+        toolbar.addWidget(self.workspace_picker)
         self.options_button = button('⚙ Tools', self.toggle_tool_options)
         self.options_button.setToolTip('Show/hide advanced brush and tool settings')
         self.layers_button = button('▤ Layers', self.toggle_layers_panel)
@@ -3083,6 +3095,8 @@ class MainWindow(QMainWindow):
             ('Zoom Out', 'Ctrl+-', lambda: self.adjust_zoom(0.8)),
             ('Fit Canvas', 'Ctrl+0', self.fit_zoom),
             ('Canvas Focus Mode', 'Tab', self.toggle_focus_mode),
+            ('Drawing Workspace', 'Ctrl+1', lambda: self._select_workspace('Drawing')),
+            ('Animation Workspace', 'Ctrl+2', lambda: self._select_workspace('Animation')),
         ]
         self._shortcut_objects = {}
         self._install_shortcuts()
@@ -3220,12 +3234,14 @@ class MainWindow(QMainWindow):
         if not self.project_active:
             return
         self.settings_scroll.setVisible(not self.settings_scroll.isVisible())
+        self._save_workspace_layout()
         self.return_canvas_focus()
 
     def toggle_layers_panel(self):
         if not self.project_active:
             return
         self.right_panel.setVisible(not self.right_panel.isVisible())
+        self._save_workspace_layout()
         self.return_canvas_focus()
 
     def _brush_preview_icon(self, category, name, payload=None):
@@ -3562,10 +3578,83 @@ class MainWindow(QMainWindow):
         if self.focus_mode:
             self.toggle_focus_mode()
 
+    def _workspace_key(self, panel):
+        return f'workspaces/{self.workspace_mode.lower()}/{panel}'
+
+    def _save_workspace_layout(self):
+        """Store only explicit panel visibility; not document or animation state."""
+        if not self.project_active or self._workspace_restoring or self.focus_mode:
+            return
+        for panel, widget in (('timeline', self.timeline_container),
+                              ('tools', self.settings_scroll),
+                              ('layers', self.right_panel)):
+            # isHidden measures direct visibility rather than ancestor visibility.
+            self.preferences.setValue(self._workspace_key(panel), not widget.isHidden())
+        self.preferences.sync()
+
+    def _restore_workspace_layout(self):
+        if not self.project_active:
+            return
+        self._workspace_restoring = True
+        try:
+            defaults = {'timeline': self.workspace_mode == 'Animation',
+                        'tools': False, 'layers': False}
+            for panel, widget in (('timeline', self.timeline_container),
+                                  ('tools', self.settings_scroll),
+                                  ('layers', self.right_panel)):
+                shown = self.preferences.value(self._workspace_key(panel),
+                                               defaults[panel], type=bool)
+                widget.setVisible(shown)
+            self.timeline_toggle.setText('Hide Animation Timeline' if not self.timeline_container.isHidden()
+                                         else 'Show Animation Timeline')
+            self.centralWidget().updateGeometry()
+            self.canvas_scroll.viewport().update()
+        finally:
+            self._workspace_restoring = False
+
+    def _select_workspace(self, name):
+        if self.project_active:
+            self.workspace_picker.setCurrentText(name)
+
+    def change_workspace(self, name):
+        """Switch UI layout only. Never touch canvas project data or playback."""
+        if name not in ('Drawing', 'Animation'):
+            return
+        if name == self.workspace_mode:
+            return
+        if self.project_active:
+            self._exit_focus_mode()
+            self._save_workspace_layout()
+            # Save the canvas-space point beneath the viewport center. Once Qt
+            # recalculates layout sizes, restore that point to preserve panning.
+            anchor = self.canvas.mapFrom(self.canvas_scroll.viewport(),
+                         self.canvas_scroll.viewport().rect().center())
+        else:
+            anchor = None
+        self.workspace_mode = name
+        if self.project_active:
+            self._restore_workspace_layout()
+            self._workspace_anchor_serial += 1
+            serial = self._workspace_anchor_serial
+            def restore_pan():
+                if serial != self._workspace_anchor_serial or not self.project_active:
+                    return
+                viewport = self.canvas_scroll.viewport()
+                target = self.canvas.mapTo(viewport, anchor)
+                midpoint = viewport.rect().center()
+                self.canvas_scroll.horizontalScrollBar().setValue(
+                    self.canvas_scroll.horizontalScrollBar().value() + target.x() - midpoint.x())
+                self.canvas_scroll.verticalScrollBar().setValue(
+                    self.canvas_scroll.verticalScrollBar().value() + target.y() - midpoint.y())
+            QTimer.singleShot(0, restore_pan)
+            self.status.setText(f'{name} workspace: layout changed; drawing and active frame preserved.')
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def toggle_timeline(self):
         visible = not self.timeline_container.isVisible()
         self.timeline_container.setVisible(visible)
         self.timeline_toggle.setText('Hide Animation Timeline' if visible else 'Show Animation Timeline')
+        self._save_workspace_layout()
         # Widget visibility must not cause the top-level window to grow beyond the screen.
         self.centralWidget().updateGeometry()
         self.canvas_scroll.viewport().update()
@@ -4089,16 +4178,20 @@ class MainWindow(QMainWindow):
 
     def _set_project_active(self, active):
         self._exit_focus_mode()
-        starting_project = active and not self.project_active
+        if not active and self.project_active:
+            self._save_workspace_layout()
         self.project_active = active
         self.workspace.setVisible(active)
         self.welcome.setVisible(not active)
         self.timeline_toggle.setVisible(active)
-        # Drawing-first startup: each newly opened/created project begins with
-        # timeline collapsed; it remains available from the toggle button.
-        if starting_project or not active:
+        self.workspace_picker.setEnabled(active)
+        if active:
+            # Each workspace remembers its own layout, with Drawing initially
+            # timeline-free and Animation initially timeline-visible.
+            self._restore_workspace_layout()
+        else:
             self.timeline_container.hide()
-        self.timeline_toggle.setText('Hide Animation Timeline' if self.timeline_container.isVisible() else 'Show Animation Timeline')
+            self.timeline_toggle.setText('Show Animation Timeline')
         for b in self.toolbar_buttons:
             if b.text() not in ('New', 'Open .las'):
                 b.setEnabled(active)
@@ -4431,6 +4524,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.pause_playback()
         if self._confirm_discard():
+            if self.focus_mode:
+                self._exit_focus_mode()
+            self._save_workspace_layout()
             self.audio_temp.cleanup()
             event.accept()
         else:
