@@ -1,37 +1,35 @@
-# Linux Animation Studio v0.27.0
+# Linux Animation Studio v0.27.1
 
-**Drawing and Animation Workspaces**. This release keeps the v0.26 drawing engine, Color Studio, animation timeline, audio, and `.las` project format intact while adding dedicated layouts for drawing and animation.
+**Color Studio palette refresh fix and individual swatch removal.** This is a focused maintenance release based directly on v0.27.0. Drawing/Animation workspaces, drawing engine, audio, exports, and `.las` project format are unchanged.
 
-## What's new
+## Changes
 
-- **Workspace switcher:** The compact top toolbar offers **Drawing** and **Animation**. Use the drop-down or the configurable **Ctrl+1** / **Ctrl+2** shortcuts.
-- **Drawing workspace:** Defaults to the timeline hidden, Tools and Layers panels hidden. This is the default workspace when launching LAS or opening a new session.
-- **Animation workspace:** Defaults to the timeline visible, Tools and Layers panels hidden. The timeline, transport, exposure grips, onion skin controls, audio tab and multi-frame edit tools remain available.
-- **Independent layout memory:** Each workspace saves the visibility of the timeline, Tools, and Layers panels in cross-platform Qt application preferences. Hide/show a panel, switch away, and return to find your preferred arrangement. These are *per-computer user preferences*, not project content.
-- **Non-destructive workspace switching:** The switcher changes the visible layout only. Active frame, layer, drawing color, brush selection, canvas zoom, document state, and audio remain in place. The switch attempts to preserve the canvas-space point in the viewport center when panel geometry changes.
-- **Focus Mode:** Tab still hides all controls. Switching workspace exits Focus Mode first, and Tab can be used independently in either layout.
-- **No project at launch:** Retains v0.26 welcome screen, New/Open Project buttons, black default brush color, and `.las` v6 compatibility.
+- **Fixed: My Palette appears empty when first opening the Palettes tab.** The swatch grid is populated when Color Studio initializes and refreshed whenever you switch back to the Palettes tab, even if the palette dropdown selection has not changed.
+- **Remove individual palette swatches.** Click a color swatch, then use **Remove selected**, or **right-click** the swatch and choose **Remove color from palette**. The visible button also supports pen/tablet users without a convenient secondary-click gesture.
+- The removal control is disabled until a swatch is selected. The selected swatch gets a blue border, and switching palettes clears that selection.
+- A swatch removal saves immediately to Color Studio's `QSettings` preferences and does **not** change the active brush color or delete the palette itself. Swatches can be added again using **Add current color**.
+- Existing named palettes and color data are preserved. No `.las` document format update; version **6** remains in use.
 
 ## Acceptance checklist
 
-1. **Startup:** LAS launches with no project open; New/Open buttons work. After creating/opening a project, Drawing is selected and the timeline is initially collapsed unless the user's Drawing layout preference was intentionally changed.
-2. **Drawing layout:** The canvas has maximum room; expand/collapse Tools, Layers, and Timeline as desired.
-3. **Animation layout:** Switch to Animation; timeline appears by default for a first-time user. Frame strip, transport, cels, onion skins, audio, and motion tabs remain usable.
-4. **Independent preferences:** In Drawing, show Layers but hide Tools/Timeline. In Animation, show Timeline/Tools but hide Layers. Switch back and forth and verify each workspace restores its own arrangement.
-5. **Restart persistence:** Close LAS, reopen a project, and switch between workspaces to confirm both panel arrangements are remembered. Startup mode remains Drawing.
-6. **Toolbar and keyboard:** Test the workspace dropdown, Ctrl+1, Ctrl+2, keyboard remapping, and shortcut conflict detection.
-7. **State preservation:** On frame 10 at 200% zoom, switch layouts. Verify same frame, selected layer, drawing color, brush and zoom, with no unexpected changes to artwork or playhead.
-8. **Focus Mode:** Tab to hide panels and restore them in both workspaces; switch workspace before and after Focus Mode.
-9. **Small-screen:** Test Surface Pro 3 layout with panels open and closed; ensure the toolbar, project canvas, and animation timeline remain accessible.
-10. **Drawing regression:** Test Wacom pressure on Linux/Windows, lasso/transform, multi-frame edit and grouped undo/redo.
-11. **Animation/audio:** Test exposure holds, linked cels, playback, waveform seeking, audio sync, PNG and MP4 export.
-12. **Cross-platform:** Launch and switch workspaces on Linux, Windows, and macOS; save and reload a `.las` v6 project.
+1. Create/open a project and set a brush color.
+2. Open **Color Studio → Palettes** for the **first** time. If My Palette already has colors, verify that they appear without switching the dropdown.
+3. Add a new color to My Palette. Verify that it appears immediately.
+4. Switch to **Disc**, then back to **Palettes**. Verify that the swatches remain visible.
+5. Switch to **Starter**, then back to **My Palette**. Verify that each palette shows its own colors.
+6. Click a swatch. Verify that it gets a blue border and becomes the chosen drawing color.
+7. Click **Remove selected**. Verify that only the selected swatch disappears and the chosen drawing color stays the same.
+8. Right-click a different swatch and select **Remove color from palette**. Verify that it is removed.
+9. Restart LAS and reopen Color Studio. Verify removed colors remain removed and remaining colors still appear instantly.
+10. Check that the Palettes tab fits on the Surface Pro 3, including the pen-accessible **Remove selected** button.
+11. Verify no regression in Color Disc/Harmony/Values, Drawing/Animation workspace switching, `.las` saving/loading, brushes, animation, audio, or export.
+12. Where possible, repeat startup, palette, and persistence checks on Linux, Windows, and macOS.
 
-**Testing status:** Python source compilation and archive integrity checks passed, with targeted headless state-transition tests for workspace preferences. The Qt GUI itself has not been exercised on target hardware in this environment; v0.27 is a testing candidate. Make backups of important projects when trying development builds.
+**Testing status:** Python source compilation and archive integrity checks are performed before release. GUI interactions must be validated on target hardware; this is a testing candidate. Back up important projects before testing development builds.
 
 ## Setup and launch
 
-Unzip this four-file source package and replace the corresponding files in your GitHub repository. Commit the changes, then pull them on each computer. The `.venv` virtual environment is **not** included and must be created separately per OS.
+Replace the corresponding four source files in your GitHub repository, commit, and pull on each device. The `.venv` is not included.
 
 ### Linux (Surface Pro 3 / Pop!_OS)
 
@@ -58,12 +56,4 @@ git pull --ff-only
 ./.venv/bin/python main.py
 ```
 
-Replace the example Windows and macOS paths with the locations of your repository clones.
-
-### Dependencies and caveats
-
-- Python 3.12 with PySide6; install `requirements.txt` in the platform's virtual environment if needed.
-- MP4 export requires a separate FFmpeg CLI executable available via PATH or `LAS_FFMPEG_PATH`.
-- `.las` document format is unchanged at v6. UI workspace preferences are stored using `QSettings` on the local machine, not in the `.las` file.
-- Mac pen input with the legacy CTH-490 remains unverified because of driver compatibility; macOS mouse and keyboard workflows have been tested previously.
-- Standalone `.exe` and `.app` packages are not included.
+Use the actual repository paths on Windows and macOS. Python 3.12 with PySide6 is required. MP4 exporting requires FFmpeg (PATH or `LAS_FFMPEG_PATH`). macOS pen-tablet input remains unverified due to unsupported older Wacom driver/hardware.

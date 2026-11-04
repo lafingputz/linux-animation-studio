@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.26: color, startup and tool feedback improvements."""
+"""Linux Animation Studio v0.27.1: palette refresh and swatch removal."""
 import io
 import wave
 import time
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.27.0"
+APP_VERSION = "0.27.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2441,7 +2441,11 @@ class ColorStudioDialog(QDialog):
         palette_layout = QVBoxLayout(palette_page)
         self.palette_choice = QComboBox()
         self.palette_choice.addItems(sorted(self.palettes))
-        self.palette_choice.currentIndexChanged.connect(self._render_palette)
+        self.palette_choice.currentIndexChanged.connect(self._on_palette_changed)
+        # A tab change does not change the combo index. Refresh explicitly when
+        # returning to Palettes, including the very first visit.
+        self.tabs.currentChanged.connect(self._on_color_tab_changed)
+        self.selected_palette_color = None
         palette_layout.addWidget(self.palette_choice)
         self.swatch_grid = QGridLayout()
         palette_layout.addLayout(self.swatch_grid)
@@ -2451,9 +2455,14 @@ class ColorStudioDialog(QDialog):
         make.clicked.connect(self._new_palette)
         add = QPushButton('Add current color')
         add.clicked.connect(self._save_color)
+        self.remove_swatch_button = QPushButton('Remove selected')
+        self.remove_swatch_button.setToolTip('Select a palette swatch, then remove it. You can also right-click a swatch.')
+        self.remove_swatch_button.clicked.connect(self._remove_selected_swatch)
         palette_commands.addWidget(make)
         palette_commands.addWidget(add)
         palette_layout.addLayout(palette_commands)
+        # Keep the layout usable on the Surface Pro 3 and narrow windows.
+        palette_layout.addWidget(self.remove_swatch_button)
         self.tabs.addTab(palette_page, 'Palettes')
 
         values_page = QWidget()
@@ -2475,6 +2484,7 @@ class ColorStudioDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self._set_color(self.color)
+        self._render_palette()  # Populate the initially selected palette before opening the tab.
 
     def current_color(self):
         return QColor(self.color)
@@ -2551,6 +2561,7 @@ class ColorStudioDialog(QDialog):
         self._persist_palettes()
         self.palette_choice.addItem(name)
         self.palette_choice.setCurrentText(name)
+        self.selected_palette_color = None
         self._render_palette()
 
     def _save_color(self):
@@ -2565,15 +2576,55 @@ class ColorStudioDialog(QDialog):
             self._persist_palettes()
         self._render_palette()
 
+    def _on_palette_changed(self, *_):
+        self.selected_palette_color = None
+        self._render_palette()
+
+    def _on_color_tab_changed(self, index):
+        if self.tabs.tabText(index) == 'Palettes':
+            self._render_palette()
+
+    def _choose_palette_swatch(self, color):
+        self.selected_palette_color = color
+        self._set_color(QColor(color))
+        self._render_palette()
+
+    def _remove_selected_swatch(self):
+        name = self.palette_choice.currentText()
+        color = self.selected_palette_color
+        if not name or not color or color not in self.palettes.get(name, []):
+            return
+        # Removing a saved swatch must not alter the active drawing color.
+        self.palettes[name].remove(color)
+        self.selected_palette_color = None
+        self._persist_palettes()
+        self._render_palette()
+
+    def _swatch_context_menu(self, button, color, position):
+        menu = QMenu(self)
+        remove = menu.addAction('Remove color from palette')
+        chosen = menu.exec(button.mapToGlobal(position))
+        if chosen == remove:
+            self.selected_palette_color = color
+            self._remove_selected_swatch()
+
     def _render_palette(self, *_):
         self._clear_layout(self.swatch_grid)
         name = self.palette_choice.currentText()
-        for i, hex_color in enumerate(self.palettes.get(name, [])):
+        colors = self.palettes.get(name, [])
+        if self.selected_palette_color not in colors:
+            self.selected_palette_color = None
+        self.remove_swatch_button.setEnabled(self.selected_palette_color is not None)
+        for i, hex_color in enumerate(colors):
             button = QPushButton('')
-            button.setToolTip(hex_color.upper() + ' • click to select')
+            button.setToolTip(hex_color.upper() + ' • click to select • right-click to remove')
             button.setFixedSize(43, 39)
-            button.setStyleSheet('background:%s; border:1px solid #89909b; border-radius:5px;' % hex_color)
-            button.clicked.connect(lambda checked=False, c=hex_color: self._set_color(QColor(c)))
+            border = '3px solid #39b6ef' if hex_color == self.selected_palette_color else '1px solid #89909b'
+            button.setStyleSheet('background:%s; border:%s; border-radius:5px;' % (hex_color, border))
+            button.clicked.connect(lambda checked=False, c=hex_color: self._choose_palette_swatch(c))
+            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda pos, b=button, c=hex_color: self._swatch_context_menu(b, c, pos))
             self.swatch_grid.addWidget(button, i//6, i%6)
 
 
