@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.27.1: palette refresh and swatch removal."""
+"""Linux Animation Studio v0.28.0: interface polish and packaging support."""
 import io
 import wave
 import time
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.27.1"
+APP_VERSION = "0.28.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -4199,7 +4199,7 @@ class MainWindow(QMainWindow):
         self.color_button.setToolTip(f'Color: {color.name().upper()} (click to change)')
         self.color_button.setStyleSheet(
             f'QPushButton {{ color: {color.name()}; font-size: 27px; '
-            'border: 1px solid palette(mid); border-radius: 18px; padding: 0px; }}')
+            'border: 1px solid #888888; border-radius: 18px; padding: 0px; }}')
 
     def adjust_zoom(self, factor):
         if not self.project_active:
