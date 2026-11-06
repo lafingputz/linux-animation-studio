@@ -1,10 +1,11 @@
-# Linux Animation Studio v0.28.0
+# Linux Animation Studio v0.28.1
 
-**Maintenance, diagnostics, and experimental native packaging.** Based directly on the user-tested v0.27.1 source. The drawing engine, animation functionality, workspace layout model, and `.las` document format (v6) have not been intentionally changed.
+**Targeted Qt stylesheet fix.** Based directly on v0.28.0, retaining its diagnostics, native packaging tools, and compatibility tests. The drawing engine, animation functionality, workspace layout model, and `.las` document format (v6) have not been intentionally changed.
 
 ## What's changed
 
-- **Qt warning cleanup:** Replaced `palette(mid)` in the shared toolbar color button's stylesheet with a literal `#888888` border color. This is the suspected source of `Could not parse stylesheet of object QPushButton(...)` after Color Studio confirmation, creating a project, and closing/discarding one. Verify on Windows PowerShell; no runtime GUI validation was possible in this build environment.
+- **Qt warning correction:** Found a malformed stylesheet created by concatenating a Python f-string with a normal string. The `QPushButton` rule ended with two literal closing braces (`}}`) instead of one (`}`). Corrected that rule in `MainWindow.update_color_swatch()`. The color button is refreshed at startup, project creation, Color Studio confirmation and project closing, matching the reported warning triggers. Verify on Windows PowerShell; the GUI could not be run in the build environment.
+- **Regression check:** Added a dependency-free automated test that executes the exact color-button stylesheet-producing function against fake widgets and verifies balanced CSS braces. This catches recurrence of the specific malformed-string bug.
 - **Experimental native packaging helper:** `tools/build.py` invokes PyInstaller on the *current operating system* to build a one-directory application. Windows builds contain an `.exe`, macOS builds an `.app`, and Linux builds an executable in an application folder. Packaging is **not** cross-platform: run the script separately on each OS.
 - **Optional FFmpeg sidecar:** `--ffmpeg /path/to/ffmpeg` copies a legal-to-redistribute FFmpeg executable beside the bundled app so MP4 export can locate it. Without bundling, users can install FFmpeg system-wide or set `LAS_FFMPEG_PATH`.
 - **Project compatibility smoke tests:** `tests/test_project_compat.py` generates tiny legacy format fixtures for `.las` v1–v6, tests v6 save/reopen, and rejects an invalid project without replacing the current document. These are *new tests*, not a claim that all historical projects have been tested.
@@ -74,19 +75,15 @@ python tools/benchmark.py
 
 The compatibility test module sets `QT_QPA_PLATFORM=offscreen` by default, suitable for headless smoke testing on systems with the required Qt platform plugins. Offscreen rendering is not an alternative to testing a real pen or GUI. Compare benchmark numbers only on the same machine, Qt version, and OS. Performance optimization comes after collecting representative measurements.
 
-## v0.28 acceptance tests
+## v0.28.1 acceptance tests
 
-1. Open Color Studio, change the color, press OK, and check PowerShell for the former stylesheet warning.
-2. Create a project and close/discard it, checking for the same warning.
-3. Verify palette contents, adding/removing colors, and persistence.
-4. Run `python -m unittest discover -s tests -v`; check legacy v1–v6 smoke fixtures and v6 roundtrip.
-5. Run `python tools/doctor.py` and confirm correct Python, PySide6, and FFmpeg diagnostics.
-6. Run `python tools/benchmark.py`; note baseline numbers for future comparison.
-7. Run `python tools/build.py --dry-run` on all three OSs.
-8. Build using PyInstaller on Windows, Linux, and macOS; check that the native application launches (test on each OS separately).
-9. Exercise drawing, pen pressure where supported, workspaces, save/reopen, animation playback, and audio in native builds.
-10. Verify PNG, PNG sequence, and MP4 export, with a usable FFmpeg executable.
-11. Recheck the Surface Pro 3 small-screen layouts, tool icons, color studio, and Canvas Focus Mode.
-12. Confirm existing `.las` projects still open and save correctly after updating.
+1. Start LAS with PowerShell/Terminal visible and confirm **zero** `Could not parse stylesheet of object QPushButton(...)` warnings (previously three on launch).
+2. Start a New Project, set width and height, press OK, and confirm **zero** warnings (previously one).
+3. Open Color Studio, change color, press OK, and confirm no warning; check the toolbar color changes.
+4. Close a project, choose Discard, and confirm no warning.
+5. Confirm Color Studio Palettes, adding/removing colors, and persistence still work.
+6. Run `python -m unittest discover -s tests -v`; verify the new stylesheet test and project compatibility tests pass.
+7. Validate existing standalone builds are rebuilt from v0.28.1 source and launch on each OS.
+8. Run full drawing/animation, audio, workspaces, PNG/MP4 export, and project open/save smoke tests.
 
 **Status:** Source syntax checks, ZIP-integrity checks, and available lightweight tests are completed at packaging time. Real GUI behavior and native PyInstaller builds must be tested on Linux, Windows, and macOS. The `.las` document format remains **version 6**. macOS pen tablet functionality remains unverified because the older Wacom hardware/driver isn't supported on that machine.
