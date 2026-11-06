@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.28.1"
+APP_VERSION = "0.29.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -72,6 +72,17 @@ def application_data_root():
 
 
 BRUSH_ROOT = application_data_root() / 'brushes'
+
+
+def source_frame_for_export(output_index, source_fps, export_fps, source_count):
+    """Map an exported image to its source cel without changing document timing.
+
+    Keeping the mapping independent of Qt lets regression tests verify that
+    higher export FPS duplicates rather than resamples or interpolates cels.
+    """
+    if source_fps <= 0 or export_fps <= 0 or source_count <= 0 or output_index < 0:
+        raise ValueError('Invalid export frame/timing settings')
+    return min(source_count - 1, output_index * source_fps // export_fps)
 
 
 def resolve_ffmpeg():
@@ -4515,25 +4526,35 @@ class MainWindow(QMainWindow):
             with tempfile.TemporaryDirectory(prefix='las-export-') as temp:
                 folder = Path(temp) if is_mp4 else Path(destination)
                 folder.mkdir(parents=True, exist_ok=True)
+                # Exporting at a higher FPS repeats some source frames. Reuse
+                # the previously rendered PNG instead of compositing and
+                # PNG-encoding identical pixels again. Keep each output filename
+                # separate for FFmpeg and PNG-sequence compatibility.
+                previous_source = None
+                previous_png = None
                 for i in range(output_count):
                     QApplication.processEvents()
                     if progress.wasCanceled():
                         self.status.setText('Export canceled')
                         return
-                    source_index = min(source_count - 1, i * source_fps // output_fps)
-                    bg = 'white' if is_mp4 or fmt.currentIndex() == 1 else None
-                    frame = self.canvas.render_frame(source_index, bg)
-                    if is_mp4 and (frame.width() % 2 or frame.height() % 2):
-                        padded = QImage(frame.width() + frame.width() % 2,
-                                        frame.height() + frame.height() % 2, IMAGE_FORMAT)
-                        padded.fill(Qt.GlobalColor.white)
-                        painter = QPainter(padded)
-                        painter.drawImage(0, 0, frame)
-                        painter.end()
-                        frame = padded
+                    source_index = source_frame_for_export(i, source_fps, output_fps, source_count)
                     name = folder / f'frame_{i+1:06d}.png'
-                    if not frame.save(str(name), 'PNG'):
-                        raise OSError(f'Could not write {name}')
+                    if source_index == previous_source and previous_png is not None:
+                        shutil.copyfile(previous_png, name)
+                    else:
+                        bg = 'white' if is_mp4 or fmt.currentIndex() == 1 else None
+                        frame = self.canvas.render_frame(source_index, bg)
+                        if is_mp4 and (frame.width() % 2 or frame.height() % 2):
+                            padded = QImage(frame.width() + frame.width() % 2,
+                                            frame.height() + frame.height() % 2, IMAGE_FORMAT)
+                            padded.fill(Qt.GlobalColor.white)
+                            painter = QPainter(padded)
+                            painter.drawImage(0, 0, frame)
+                            painter.end()
+                            frame = padded
+                        if not frame.save(str(name), 'PNG'):
+                            raise OSError(f'Could not write {name}')
+                    previous_source, previous_png = source_index, name
                     progress.setValue(i + 1)
                 if is_mp4:
                     progress.setLabelText('Encoding MP4 with FFmpeg...')

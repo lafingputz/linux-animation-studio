@@ -1,17 +1,22 @@
-# Linux Animation Studio v0.28.1
+# Linux Animation Studio v0.29.0
 
-**Targeted Qt stylesheet fix.** Based directly on v0.28.0, retaining its diagnostics, native packaging tools, and compatibility tests. The drawing engine, animation functionality, workspace layout model, and `.las` document format (v6) have not been intentionally changed.
+**Performance & distribution polish.** Built from the tested v0.28.1 source. This release optimizes repeated-frame animation export, adds native-build verification, and preserves the established drawing, audio, animation, workspace, and Color Studio workflows. The `.las` project format remains **version 6**.
 
-## What's changed
+## What's new
 
-- **Qt warning correction:** Found a malformed stylesheet created by concatenating a Python f-string with a normal string. The `QPushButton` rule ended with two literal closing braces (`}}`) instead of one (`}`). Corrected that rule in `MainWindow.update_color_swatch()`. The color button is refreshed at startup, project creation, Color Studio confirmation and project closing, matching the reported warning triggers. Verify on Windows PowerShell; the GUI could not be run in the build environment.
-- **Regression check:** Added a dependency-free automated test that executes the exact color-button stylesheet-producing function against fake widgets and verifies balanced CSS braces. This catches recurrence of the specific malformed-string bug.
-- **Experimental native packaging helper:** `tools/build.py` invokes PyInstaller on the *current operating system* to build a one-directory application. Windows builds contain an `.exe`, macOS builds an `.app`, and Linux builds an executable in an application folder. Packaging is **not** cross-platform: run the script separately on each OS.
-- **Optional FFmpeg sidecar:** `--ffmpeg /path/to/ffmpeg` copies a legal-to-redistribute FFmpeg executable beside the bundled app so MP4 export can locate it. Without bundling, users can install FFmpeg system-wide or set `LAS_FFMPEG_PATH`.
-- **Project compatibility smoke tests:** `tests/test_project_compat.py` generates tiny legacy format fixtures for `.las` v1–v6, tests v6 save/reopen, and rejects an invalid project without replacing the current document. These are *new tests*, not a claim that all historical projects have been tested.
-- **Developer diagnostics:** `tools/doctor.py` prints Python, PySide6, PyInstaller, FFmpeg, OS, and Qt platform configuration.
-- **Performance baseline:** `tools/benchmark.py` measures a repeatable 1200×800 canvas composite to establish a baseline before attempting optimizations. No unverified drawing engine speedup is claimed for this release.
-- Expanded `.gitignore` so local PyInstaller build products don't get committed.
+- **Faster export when increasing FPS:** If a source frame must appear multiple times in an exported PNG sequence or MP4 frame sequence (for example, 12 FPS to 24 FPS), LAS now renders/encodes the source frame **once** and copies the encoded PNG for repeated output frames. All numbered output files still exist. The optimization has no effect on exports where output source frames are unique. Speedups are workload- and disk-dependent and have **not** been benchmarked on actual hardware here.
+- **Pure export frame-mapping helper:** `source_frame_for_export()` preserves the old frame-time mapping; four dependency-free tests cover higher/lower/uneven FPS and invalid input. No motion interpolation or audio timing changes are introduced.
+- **Standalone build verification:** `tools/check_build.py` checks the expected executable/bundle path and macOS Info.plist, and `tools/build.py` automatically performs these checks after PyInstaller builds. This validates structure, **not** runtime correctness, FFmpeg operation, signing, or clean-machine support.
+- **Packaging layout tests:** Three new lightweight tests cover cross-platform expected paths and missing-build detection.
+- **Existing tools retained:** Diagnostics, repeatable canvas composite benchmark, PyInstaller helper, and source/project tests remain available.
+- **Qt stylesheet fix retained:** The warning addressed in v0.28.1 is still covered by its dedicated regression test.
+
+## Verification and limitations
+
+- Python syntax/compilation, release-structure tests, export mapping tests, build-layout tests, and build dry-run passed in the packaging environment.
+- **PySide6 was unavailable in that environment**, so `tests/test_project_compat.py`, the GUI, standalone native packaging, and real performance measurements must be verified on your computers.
+- Mac pen pressure remains unverified on supported tablet hardware. Windows/Linux pressure testing should be repeated in the normal regression pass.
+- Do not distribute packaged applications publicly without checking licensing (especially FFmpeg), code signing/notarization, and clean-machine dependencies.
 
 ## Source install and launch
 
@@ -73,17 +78,19 @@ python -m unittest discover -s tests -v
 python tools/benchmark.py
 ```
 
-The compatibility test module sets `QT_QPA_PLATFORM=offscreen` by default, suitable for headless smoke testing on systems with the required Qt platform plugins. Offscreen rendering is not an alternative to testing a real pen or GUI. Compare benchmark numbers only on the same machine, Qt version, and OS. Performance optimization comes after collecting representative measurements.
+The compatibility test module sets `QT_QPA_PLATFORM=offscreen` by default, suitable for headless smoke testing on systems with the required Qt platform plugins. Offscreen rendering is not an alternative to testing a real pen or GUI. Compare benchmark numbers only on the same machine, Qt version, and OS. Performance measurements for canvas compositing remain the same baseline; this release optimizes repeated export frames only.
 
-## v0.28.1 acceptance tests
+## v0.29 acceptance tests
 
-1. Start LAS with PowerShell/Terminal visible and confirm **zero** `Could not parse stylesheet of object QPushButton(...)` warnings (previously three on launch).
-2. Start a New Project, set width and height, press OK, and confirm **zero** warnings (previously one).
-3. Open Color Studio, change color, press OK, and confirm no warning; check the toolbar color changes.
-4. Close a project, choose Discard, and confirm no warning.
-5. Confirm Color Studio Palettes, adding/removing colors, and persistence still work.
-6. Run `python -m unittest discover -s tests -v`; verify the new stylesheet test and project compatibility tests pass.
-7. Validate existing standalone builds are rebuilt from v0.28.1 source and launch on each OS.
-8. Run full drawing/animation, audio, workspaces, PNG/MP4 export, and project open/save smoke tests.
+1. Source launch on Linux, Windows, macOS; ensure no Qt stylesheet warnings.
+2. Create/open/save `.las` projects; preserve brush color, frame and workspace state.
+3. Verify PNG sequence export at the **same** FPS and **higher** FPS (12→24), and compare repeated frames visually.
+4. Verify **lower** FPS (24→12) and **uneven** FPS (10→15) sequence exports.
+5. Export MP4 with embedded audio; check audio stays synchronized after FPS conversion.
+6. Run `python -m unittest discover -s tests -v` using the LAS virtual environment.
+7. Run `python tools/benchmark.py` and compare to your v0.28 baseline on the same machine/settings.
+8. Build standalone apps on each OS using `python tools/build.py`; run `python tools/check_build.py`.
+9. Launch the native application and check drawing, Color Studio, timeline, save/load, and MP4 export.
+10. Retest Wacom pressure, selection/transform, multi-frame editing, onion skinning, and compact Surface UI.
 
-**Status:** Source syntax checks, ZIP-integrity checks, and available lightweight tests are completed at packaging time. Real GUI behavior and native PyInstaller builds must be tested on Linux, Windows, and macOS. The `.las` document format remains **version 6**. macOS pen tablet functionality remains unverified because the older Wacom hardware/driver isn't supported on that machine.
+**Status:** v0.29.0 test candidate; `.las` format is unchanged (v6).

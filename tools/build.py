@@ -40,8 +40,12 @@ def main():
     else:
         binary_dir = dist / APP
         result = binary_dir / (APP + ('.exe' if os.name == 'nt' else ''))
-    if not result.exists():
-        raise SystemExit(f'Build completed, but expected output not found: {result}')
+    # Validate the native output layout; launching and exporting still require
+    # manual tests on the target operating system.
+    from check_build import validate_build
+    _, _, issues = validate_build(ROOT)
+    if issues:
+        raise SystemExit('\n'.join(issues))
     if args.ffmpeg:
         output = destination(binary_dir)
         if args.ffmpeg.resolve() != output.resolve():
