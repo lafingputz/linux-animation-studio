@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.30: dockable workspaces and compact animation commands."""
+"""Linux Animation Studio v0.30.1: Wayland floating-dock grip and visible resize separators."""
 import io
 import wave
 import time
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.30.0"
+APP_VERSION = "0.30.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2675,6 +2675,67 @@ class ColorStudioDialog(QDialog):
             self.swatch_grid.addWidget(button, i//6, i%6)
 
 
+class WaylandFloatingDockHandle(QWidget):
+    """Title-bar move surface for floating docks on Wayland.
+
+    Moving a top-level window by calling QWidget.move() does not work reliably
+    on Wayland. startSystemMove() starts a compositor-approved pointer grab
+    during the real mouse press event instead.
+    """
+    def __init__(self, dock):
+        super().__init__(dock)
+        self.dock = dock
+        self.setObjectName('LASFloatingDockGrip')
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setToolTip('Drag to move this panel; double-click to dock')
+        self.setMinimumHeight(30)
+        self.setStyleSheet('''
+            QWidget#LASFloatingDockGrip {
+                background-color: #40546b;
+                border-bottom: 2px solid #89a9cb;
+            }
+            QLabel { color: #f3f7fd; font-weight: bold; padding-left: 4px; }
+            QToolButton {
+                color: #f3f7fd; background-color: #526b87;
+                border: 1px solid #a0b4ca; border-radius: 3px;
+                min-width: 45px; min-height: 22px;
+            }
+        ''')
+        bar = QHBoxLayout(self)
+        bar.setContentsMargins(6, 2, 6, 2)
+        bar.setSpacing(6)
+        label = QLabel('⠿  ' + dock.windowTitle())
+        label.setToolTip('Drag here to move the floating window')
+        # The title label is decorative; the containing widget receives press events.
+        label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        bar.addWidget(label, 1)
+        redock = QToolButton(self)
+        redock.setText('Dock')
+        redock.setToolTip('Return this panel to the main LAS window')
+        redock.clicked.connect(lambda: dock.setFloating(False))
+        bar.addWidget(redock)
+        close = QToolButton(self)
+        close.setText('×')
+        close.setToolTip('Hide this panel')
+        close.clicked.connect(dock.hide)
+        bar.addWidget(close)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.dock.isFloating():
+            window = self.dock.windowHandle()
+            if window is not None and window.startSystemMove():
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dock.setFloating(False)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -3103,6 +3164,29 @@ class MainWindow(QMainWindow):
         self.setDockOptions(QMainWindow.DockOption.AllowNestedDocks |
                             QMainWindow.DockOption.AllowTabbedDocks |
                             QMainWindow.DockOption.AnimatedDocks)
+        # High-contrast, pen-friendly native dock separators. These are the
+        # actual QMainWindow resize handles, not cosmetic overlay widgets.
+        self.setStyleSheet(self.styleSheet() + """
+            QMainWindow::separator {
+                background-color: #607b99;
+                width: 9px;
+                height: 9px;
+            }
+            QMainWindow::separator:hover { background-color: #8bb5df; }
+            QDockWidget::title {
+                background-color: #40546b;
+                color: #f3f7fd;
+                padding: 5px;
+                border: 1px solid #708da9;
+            }
+        """)
+        # The native floating title-bar drag behavior differs on Wayland.
+        # Install a compositor-aware move grip only for Wayland floaters.
+        self._wayland_dock_grips = (
+            sys.platform.startswith('linux') and
+            ('wayland' in QApplication.platformName().lower() or
+             os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland')
+        )
         self._docks = {}
         for name, area, widget in (
             ('tools', Qt.DockWidgetArea.LeftDockWidgetArea, self.settings_scroll),
@@ -3796,6 +3880,14 @@ class MainWindow(QMainWindow):
         self._save_workspace_layout()
 
     def _dock_floating_changed(self, name, floating):
+        if self._wayland_dock_grips:
+            dock = self._docks[name]
+            if floating:
+                dock.setTitleBarWidget(WaylandFloatingDockHandle(dock))
+            else:
+                # Restore native dock titles, preserving Qt's built-in dragging
+                # and docking behavior when the panel is inside the main window.
+                dock.setTitleBarWidget(None)
         self._save_workspace_layout()
 
     def _save_workspace_layout(self):
@@ -3838,6 +3930,9 @@ class MainWindow(QMainWindow):
                 shown = self.preferences.value(self._workspace_key(name), defaults[name], type=bool)
                 dock.setVisible(shown)
             self._recover_offscreen_docks()
+            if self._wayland_dock_grips:
+                for name, dock in self._docks.items():
+                    self._dock_floating_changed(name, dock.isFloating())
             self.centralWidget().updateGeometry()
             self.canvas_scroll.viewport().update()
         finally:

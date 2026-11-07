@@ -1,6 +1,18 @@
-# Linux Animation Studio v0.30.0
+# Linux Animation Studio v0.30.1
 
 **Dockable Workspaces, Compact Animation Menu & Batch Frames.** Based on the user-tested v0.29.0 source. The `.las` project format remains **v6**, and the existing drawing, Color Studio, playback, exposure, audio, and export functionality is retained.
+
+
+## v0.30.1 Linux docking usability patch
+
+- **Wayland floating panel movement:** On Linux Wayland, floating Timeline, Tools, and Layers docks now use a high-contrast custom grip labeled with the panel name. Press and drag the grip to request a compositor-managed window move using `QWindow.startSystemMove()`. Use the new **Dock** button (or double-click the grip) to reattach a panel; **×** hides it. The custom grip is active only on Wayland floating docks, so Windows and macOS keep the native Qt docking title bars.
+- **Visible resize boundaries:** Native QMainWindow dock separators are now 9 pixels wide/high with a contrasting default and hover color. The edges remain true Qt resize handles, not visual decorations.
+- **Existing layouts protected:** The current dock state, workspace visibility, detached-window recovery, Canvas Focus Mode, and project format v6 are unchanged.
+- **Regression checks:** Added `tests/test_dock_grip.py`, checking the compositor move call, Linux-only activation, redock action, and separator rules.
+
+**Testing caveat:** Wayland move requests depend on the compositor supporting `startSystemMove()`. If it still refuses to move, try the Wayland window manager's native move gesture (often Super+drag) and report which compositor/session you're using. The custom title bar offers a direct redock control even if moving is unavailable.
+
+**Primary acceptance tests:** (1) On Linux Wayland, float each dock and drag by the blue grip; (2) resize via the clearly colored dock divider using Wacom/mouse; (3) redock with Dock and check the normal dock title; (4) test panel visibility, workspace persistence, Reset Workspace Layout, and `Tab` focus; (5) confirm Windows docking behaves unchanged and test on macOS.
 
 ## What's new
 
@@ -66,4 +78,4 @@ On macOS/Windows, substitute the corresponding venv Python executable if `python
 8. Verify Animation menu covers existing commands, shortcuts can be remapped, and the compact timeline leaves visible FPS, Go to, Loop, Onion Skin, ghost opacity.
 9. Test Wacom/mouse input, layers, linked cels, exposure dragging, onion skins, playback, audio sync, `.las` save/load, high-FPS PNG/MP4 exports, cross-platform source launch and packaged builds.
 
-**Status:** v0.30.0 test candidate. Mac pen-tablet pressure remains unverified on supported Mac hardware. Signing/notarization and clean-machine public distribution are not yet validated.
+**Status:** v0.30.1 test candidate. Mac pen-tablet pressure remains unverified on supported Mac hardware. Signing/notarization and clean-machine public distribution are not yet validated.
