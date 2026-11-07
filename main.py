@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.28.1: fix malformed shared color-button Qt stylesheet."""
+"""Linux Animation Studio v0.30: dockable workspaces and compact animation commands."""
 import io
 import wave
 import time
@@ -23,10 +23,10 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.29.0"
+APP_VERSION = "0.30.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -990,6 +990,23 @@ class Canvas(QWidget):
                 self.motion_changed.emit()
         elif typ == 'timeline_snapshot':
             self._restore_timeline_snapshot(cmd['after'] if forward else cmd['before'])
+        elif typ == 'frame_add_multi':
+            index, layers = cmd['index'], cmd['layers']
+            if forward:
+                self.frames[index:index] = layers
+            else:
+                if self.frames[index:index+len(layers)] != layers:
+                    raise RuntimeError('Timeline history is out of sync')
+                del self.frames[index:index+len(layers)]
+            self.frame_index = min(cmd['after_frame'] if forward else cmd['before_frame'], len(self.frames)-1)
+            keys = cmd['keys_after'] if forward else cmd['keys_before']
+            for obj in self.motion_objects:
+                if obj.id in keys:
+                    obj.keys = dict(keys[obj.id])
+            self.active_id = cmd['active_id']
+            self.selection = None
+            self.motion_changed.emit()
+            self.playhead_changed.emit(self.frame_index)
         elif typ in ('frame_add', 'frame_delete'):
             # Retain the exact removed/inserted cel objects, including static-layer
             # sharing. A command stores before/after key maps for every motion object.
@@ -1624,6 +1641,25 @@ class Canvas(QWidget):
                    active_id=self.active_id, keys_before=before, keys_after=after)
         self._apply(cmd, True)
         self._push(cmd)
+
+    def add_multiple_blank_frames(self, count, at_end=False):
+        """Insert blanks as one undoable command, preserving motion keyframe timing."""
+        count = int(count)
+        if (count < 1 or len(self.frames) + count > 120 or self.drawing
+                or self.playing or self.drag_origin is not None or self.transform_session is not None):
+            return False
+        index = len(self.frames) if at_end else self.frame_index + 1
+        before_keys = self._motion_key_snapshot()
+        after_keys = {oid: {k + count if k >= index else k: v for k, v in keys.items()}
+                      for oid, keys in before_keys.items()}
+        blank = [self._copy_layers(self.frames[min(index, len(self.frames)-1)], duplicate=False)
+                 for _ in range(count)]
+        cmd = dict(type='frame_add_multi', index=index, layers=blank,
+                   before_frame=self.frame_index, after_frame=index,
+                   active_id=self.active_id, keys_before=before_keys, keys_after=after_keys)
+        self._apply(cmd, True)
+        self._push(cmd)
+        return True
 
     def delete_frame(self):
         if self.drawing or self.drag_origin is not None or self.playing or len(self.frames) <= 1:
@@ -2830,11 +2866,10 @@ class MainWindow(QMainWindow):
         settings_scroll.setWidgetResizable(True)
         settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         settings_scroll.setMinimumWidth(160)
-        settings_scroll.setMaximumWidth(250)
+        settings_scroll.setMaximumWidth(480)
         settings_scroll.setWidget(left_panel)
         self.settings_scroll = settings_scroll
-        content.addWidget(settings_scroll)
-        settings_scroll.hide()  # Canvas first; ⚙ Tools reveals advanced settings.
+        # The Tools dock controls visibility when a project is open.
 
         scroll = PannableScrollArea()
         self.canvas_scroll = scroll
@@ -2875,8 +2910,7 @@ class MainWindow(QMainWindow):
         right.addWidget(self.opacity_input)
         self.right_panel = QWidget()
         self.right_panel.setLayout(right)
-        content.addWidget(self.right_panel)
-        self.right_panel.hide()  # Open layers from the compact toolbar.
+        # The Layers dock controls visibility when a project is open.
         self.workspace = QWidget()
         self.workspace.setLayout(content)
         vertical.addWidget(self.workspace, 1)
@@ -2904,7 +2938,7 @@ class MainWindow(QMainWindow):
         self.timeline_container = QScrollArea()
         self.timeline_container.setWidgetResizable(True)
         self.timeline_container.setMinimumHeight(120)
-        self.timeline_container.setMaximumHeight(280)
+        # Dock panel height is resizable; no fixed 280px ceiling.
         self.timeline_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.timeline_content = QWidget()
         timeline = QVBoxLayout(self.timeline_content)
@@ -2920,16 +2954,6 @@ class MainWindow(QMainWindow):
         timeline_tabs.addTab(audio_page, "Audio")
         timeline_tabs.addTab(motion_page, "Motion")
         frame_controls = QHBoxLayout()
-        for label, func in [('⏮ First', lambda: self.go_to_end_frame(first=True)),
-                            ('Previous', lambda: self.canvas.change_frame(self.canvas.frame_index-1)),
-                            ('Next', lambda: self.canvas.change_frame(self.canvas.frame_index+1)),
-                            ('Last ⏭', lambda: self.go_to_end_frame(first=False)),
-                            ('+ Blank', lambda: self.canvas.add_frame(False)),
-                            ('Duplicate', lambda: self.canvas.add_frame(True)),
-                            ('Delete', self.canvas.delete_frame)]:
-            b = QPushButton(label)
-            b.clicked.connect(func)
-            frame_controls.addWidget(b)
         frame_controls.addWidget(QLabel('FPS:'))
         self.fps_input = QSpinBox()
         self.fps_input.setRange(1, 60)
@@ -2945,32 +2969,18 @@ class MainWindow(QMainWindow):
         frame_controls.addWidget(self.frame_jump)
         frame_controls.addStretch()
         timeline.addLayout(frame_controls)
-        cel_controls = QHBoxLayout()
-        cel_controls.addWidget(QLabel('Active layer cel:'))
+        # Cel operations live in the Animation menu; these widgets remain
+        # instantiated for compatibility with keyboard shortcuts and preferences.
         self.hold_length = QSpinBox()
         self.hold_length.setRange(2, 120)
         self.hold_length.setValue(3)
-        self.hold_length.setToolTip('Total exposure duration, including current frame')
-        cel_controls.addWidget(self.hold_length)
-        for title, callback in [('Extend Hold', self.extend_hold),
-                                ('Break / New Cel', self.split_hold),
-                                ('Link From…', self.link_from),
-                                ('Unlink', self.unlink_current)]:
-            button = QPushButton(title)
-            button.clicked.connect(callback)
-            cel_controls.addWidget(button)
-        cel_page_layout.addLayout(cel_controls)
-        exact = QPushButton("Extend Hold To Frame…")
-        exact.clicked.connect(self.extend_hold_to_frame)
-        cel_page_layout.addWidget(exact)
-        self.batch_menu_button = QPushButton("Apply to Selected Frames…")
+        self.batch_menu_button = QPushButton('Apply to Selected Frames…')
         self.batch_menu_button.clicked.connect(self.batch_frame_action)
-        cel_page_layout.addWidget(self.batch_menu_button)
         self.multi_edit_checkbox = QCheckBox('Multi-frame Edit: draw / erase / transform selected frames')
         self.multi_edit_checkbox.setToolTip('Applies edits to unique cels on the active layer; linked exposures are edited once.')
         self.multi_edit_checkbox.setChecked(False)
         self.multi_edit_checkbox.toggled.connect(self._set_multi_edit)
-        cel_page_layout.addWidget(self.multi_edit_checkbox)
+        cel_page_layout.addWidget(QLabel("Use Animation menu for exposure, linking and frame actions."))
         # Always-visible warning, even when the Cels settings tab is not selected.
         self.multi_edit_indicator = QLabel('Single-frame drawing')
         self.multi_edit_indicator.setToolTip('Multi-frame editing is off; only the current frame is changed.')
@@ -2985,10 +2995,8 @@ class MainWindow(QMainWindow):
         play_controls = QHBoxLayout()
         self.play_button = QPushButton('▶ Play')
         self.play_button.clicked.connect(self.toggle_playback)
-        play_controls.addWidget(self.play_button)
         self.stop_button = QPushButton('■ Stop')
         self.stop_button.clicked.connect(self.stop_playback)
-        play_controls.addWidget(self.stop_button)
         self.loop_checkbox = QCheckBox('Loop')
         self.loop_checkbox.setChecked(True)
         self.loop_checkbox.toggled.connect(self.set_loop)
@@ -3019,34 +3027,28 @@ class MainWindow(QMainWindow):
         self.onion_next_input.setValue(self.canvas.onion_next)
         self.onion_next_input.valueChanged.connect(lambda value: self.change_onion_range('next', value))
         ranges.addWidget(self.onion_next_input)
-        onion_page_layout.addLayout(ranges)
+        self.onion_range_controls = ranges
+        onion_page_layout.addWidget(QLabel("Set previous/next ghost ranges in Animation → Onion Skins."))
         audio_controls = QHBoxLayout()
         self.audio_import_button = QPushButton('Import Audio WAV/MP3')
         self.audio_import_button.clicked.connect(self.import_audio)
-        audio_controls.addWidget(self.audio_import_button)
         self.audio_remove_button = QPushButton('Remove Audio')
         self.audio_remove_button.clicked.connect(self.remove_audio)
-        audio_controls.addWidget(self.audio_remove_button)
         self.audio_label = QLabel('No audio imported')
         audio_controls.addWidget(self.audio_label)
         self.audio_mute_checkbox = QCheckBox('Mute')
         self.audio_mute_checkbox.toggled.connect(self.set_audio_mute)
-        audio_controls.addWidget(self.audio_mute_checkbox)
-        audio_controls.addWidget(QLabel('Volume'))
         self.audio_volume = QSpinBox()
         self.audio_volume.setRange(0, 100)
         self.audio_volume.setValue(100)
         self.audio_volume.valueChanged.connect(lambda v: self.audio_output.setVolume(v / 100))
-        audio_controls.addWidget(self.audio_volume)
         audio_page_layout.addLayout(audio_controls)
         self.audio_wave = AudioWaveform()
         self.audio_wave.on_seek = self.seek_audio_fraction
-        audio_page_layout.addWidget(self.audio_wave)
         motion_controls = QHBoxLayout()
         self.motion_create = QPushButton('Make Motion Object from Layer')
         self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
         self.motion_create.clicked.connect(self.create_motion_object)
-        motion_controls.addWidget(self.motion_create)
         self.motion_select = QComboBox()
         self.motion_select.setMinimumWidth(150)
         self.motion_select.currentIndexChanged.connect(self.choose_motion_object)
@@ -3063,11 +3065,11 @@ class MainWindow(QMainWindow):
             motion_controls.addWidget(spin)
             self.motion_inputs.append(spin)
         add_key = QPushButton('Set Keyframe')
+        self.motion_add_key_button = add_key
         add_key.clicked.connect(self.set_motion_keyframe)
-        motion_controls.addWidget(add_key)
         remove_key = QPushButton('Remove Keyframe')
+        self.motion_remove_key_button = remove_key
         remove_key.clicked.connect(self.remove_motion_keyframe)
-        motion_controls.addWidget(remove_key)
         motion_page_layout.addLayout(motion_controls)
         self.canvas.motion_changed.connect(self.refresh_motion)
         self.frame_list = ExposureFrameList()
@@ -3077,7 +3079,9 @@ class MainWindow(QMainWindow):
         self.frame_list.setFlow(QListWidget.Flow.LeftToRight)
         self.frame_list.setWrapping(False)
         self.frame_list.setIconSize(__import__('PySide6.QtCore',fromlist=['QSize']).QSize(90,60))
-        self.frame_list.setFixedHeight(108)
+        self.frame_list.setMinimumHeight(90)
+        self.frame_list.setMaximumHeight(400)
+        self.frame_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.frame_list.setSpacing(5)
         self.frame_list.currentRowChanged.connect(self._timeline_current_changed)
         self.frame_list.itemSelectionChanged.connect(self._timeline_selection_changed)
@@ -3085,16 +3089,41 @@ class MainWindow(QMainWindow):
         grip_hint.setStyleSheet('color: #328f98; font-size: 10px;')
         timeline.addWidget(grip_hint)
         timeline.addWidget(self.frame_list)
+        timeline.addWidget(self.audio_wave)
         timeline.addWidget(timeline_tabs)
         # A visible horizontal frame strip; audio/cel controls remain in tabs.
-        self.timeline_container.setMaximumHeight(290)
-        self.timeline_toggle = QPushButton('Hide Animation Timeline')
+        # No fixed height restriction; allow frames and waveform together.
+        self.timeline_toggle = QPushButton('Hide Animation Timeline', self)
         self.timeline_toggle.clicked.connect(self.toggle_timeline)
-        vertical.addWidget(self.timeline_toggle)
         self.timeline_container.setWidget(self.timeline_content)
-        vertical.addWidget(self.timeline_container, 0)
         vertical.addWidget(self.status)
         self.setCentralWidget(root)
+        # QMainWindow native dock panels can be resized, detached and moved to
+        # another monitor. Their widgets remain the original tested controls.
+        self.setDockOptions(QMainWindow.DockOption.AllowNestedDocks |
+                            QMainWindow.DockOption.AllowTabbedDocks |
+                            QMainWindow.DockOption.AnimatedDocks)
+        self._docks = {}
+        for name, area, widget in (
+            ('tools', Qt.DockWidgetArea.LeftDockWidgetArea, self.settings_scroll),
+            ('layers', Qt.DockWidgetArea.RightDockWidgetArea, self.right_panel),
+            ('timeline', Qt.DockWidgetArea.BottomDockWidgetArea, self.timeline_container)):
+            dock = QDockWidget(name.title() if name != 'timeline' else 'Animation Timeline', self)
+            dock.setObjectName('LASDock_' + name)
+            dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+            dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable |
+                             QDockWidget.DockWidgetFeature.DockWidgetMovable |
+                             QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+            dock.setWidget(widget)
+            self.addDockWidget(area, dock)
+            self._docks[name] = dock
+            dock.visibilityChanged.connect(lambda shown, n=name: self._dock_visibility_changed(n, shown))
+            dock.topLevelChanged.connect(lambda floating, n=name: self._dock_floating_changed(n, floating))
+        self._docks['timeline'].setMinimumHeight(140)
+        self._docks['timeline'].resize(800, 275)
+        self._docks['tools'].hide()
+        self._docks['layers'].hide()
+        self._docks['timeline'].hide()
         self._build_tool_menus()
         saved_eraser = self.preferences.value('brush_library/eraser_size', 48, type=int)
         if 1 <= saved_eraser <= 500:
@@ -3127,6 +3156,11 @@ class MainWindow(QMainWindow):
                 action.setShortcut(QKeySequence(shortcut))
         editmenu = self.menuBar().addMenu('&Edit')
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
+        self._build_animation_menu()
+        viewmenu = self.menuBar().addMenu('&View')
+        viewmenu.addAction('Reset Workspace Layout', self.reset_workspace_layout)
+        for name, dock in self._docks.items():
+            viewmenu.addAction(dock.toggleViewAction())
         helpmenu = self.menuBar().addMenu('&Help')
         helpmenu.addAction('About Linux Animation Studio', self.show_about)
         self._set_project_active(False)
@@ -3152,6 +3186,14 @@ class MainWindow(QMainWindow):
             ('First Frame', '<', lambda: self.go_to_end_frame(first=True)),
             ('Last Frame', '>', lambda: self.go_to_end_frame(first=False)),
             ('Play/Pause', 'P', self.toggle_playback),
+            ('Stop Playback', 'Shift+P', self.stop_playback),
+            ('Add Blank Frame', 'Alt+N', lambda: self.canvas.add_frame(False)),
+            ('Duplicate Frame', 'Alt+D', lambda: self.canvas.add_frame(True)),
+            ('Add Multiple Frames', 'Alt+Shift+N', self.add_multiple_frames_dialog),
+            ('Delete Frame', 'Alt+Backspace', self.canvas.delete_frame),
+            ('Extend Hold', '', self.extend_hold_dialog),
+            ('Split Hold', '', self.split_hold),
+            ('Unlink Cel', '', self.unlink_current),
             ('Zoom In', 'Ctrl++', lambda: self.adjust_zoom(1.25)),
             ('Zoom In Alternative', 'Ctrl+=', lambda: self.adjust_zoom(1.25)),
             ('Zoom Out', 'Ctrl+-', lambda: self.adjust_zoom(0.8)),
@@ -3167,6 +3209,108 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(fn)
+
+    def _build_animation_menu(self):
+        menu = self.menuBar().addMenu('&Animation')
+        self.animation_menu = menu
+        for title, callback, shortcut in (
+            ('Play / Pause', self.toggle_playback, 'P'),
+            ('Stop', self.stop_playback, 'Shift+P'),
+            ('First Frame', lambda: self.go_to_end_frame(first=True), '<'),
+            ('Previous Frame', lambda: self.navigate_frame(-1), ','),
+            ('Next Frame', lambda: self.navigate_frame(1), '.'),
+            ('Last Frame', lambda: self.go_to_end_frame(first=False), '>')):
+            self._animation_menu_action(menu, title, callback, shortcut)
+        menu.addSeparator()
+        self._animation_menu_action(menu, 'Add Blank Frame', lambda: self.canvas.add_frame(False), 'Alt+N')
+        self._animation_menu_action(menu, 'Duplicate Frame', lambda: self.canvas.add_frame(True), 'Alt+D')
+        self._animation_menu_action(menu, 'Add Multiple Frames…', self.add_multiple_frames_dialog, 'Alt+Shift+N')
+        self._animation_menu_action(menu, 'Delete Frame', self.canvas.delete_frame, 'Alt+Backspace')
+        exposures = menu.addMenu('Exposure & Linking')
+        exposures.addAction('Extend Hold…', self.extend_hold_dialog)
+        exposures.addAction('Extend Hold To Frame…', self.extend_hold_to_frame)
+        exposures.addAction('Break / New Cel', self.split_hold)
+        exposures.addAction('Link From…', self.link_from)
+        exposures.addAction('Unlink', self.unlink_current)
+        exposures.addAction('Apply to Selected Frames…', self.batch_frame_action)
+        multi = exposures.addAction('Multi-frame Edit')
+        multi.setCheckable(True)
+        multi.setChecked(self.multi_edit_checkbox.isChecked())
+        multi.toggled.connect(self.multi_edit_checkbox.setChecked)
+        self.multi_edit_checkbox.toggled.connect(multi.setChecked)
+        onions = menu.addMenu('Onion Skins')
+        onions.addAction('Set Previous / Next Ghost Ranges…', self.set_ghost_ranges_dialog)
+        audio = menu.addMenu('Audio')
+        audio.addAction('Import Audio WAV/MP3…', self.import_audio)
+        audio.addAction('Remove Audio', self.remove_audio)
+        mute = audio.addAction('Mute Audio')
+        mute.setCheckable(True)
+        mute.toggled.connect(self.audio_mute_checkbox.setChecked)
+        self.audio_mute_checkbox.toggled.connect(mute.setChecked)
+        audio.addAction('Volume…', self.set_audio_volume_dialog)
+        motion = menu.addMenu('Motion Objects')
+        motion.addAction('Create from Layer', self.create_motion_object)
+        motion.addAction('Set Keyframe', self.set_motion_keyframe)
+        motion.addAction('Remove Keyframe', self.remove_motion_keyframe)
+
+    def _animation_menu_action(self, menu, title, callback, shortcut):
+        # QShortcut owns execution and user customization; the menu presents
+        # a shortcut hint without creating a second conflicting accelerator.
+        action = menu.addAction(title + (f'   ({shortcut})' if shortcut else ''))
+        action.triggered.connect(callback)
+        return action
+
+    def add_multiple_frames_dialog(self):
+        if not self.project_active:
+            return
+        available = 120 - len(self.canvas.frames)
+        if available <= 0:
+            QMessageBox.information(self, 'Add Multiple Frames', 'The timeline limit is 120 frames.')
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Add Multiple Blank Frames')
+        layout = QFormLayout(dialog)
+        number = QSpinBox()
+        number.setRange(1, available)
+        number.setValue(min(12, available))
+        layout.addRow('Number of blank frames:', number)
+        position = QComboBox()
+        position.addItems(['After current frame', 'At end of timeline'])
+        layout.addRow('Insert frames:', position)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.pause_playback()
+            if self.canvas.add_multiple_blank_frames(number.value(), position.currentIndex() == 1):
+                self.status.setText(f'Added {number.value()} blank frames (one undo step).')
+            else:
+                QMessageBox.warning(self, 'Add Multiple Frames', 'Could not insert frames in the current state.')
+
+    def extend_hold_dialog(self):
+        count, ok = QInputDialog.getInt(self, 'Extend Hold', 'Exposure duration (frames):',
+                                         self.hold_length.value(), 2, 120)
+        if ok:
+            self.hold_length.setValue(count)
+            self.extend_hold()
+
+    def set_ghost_ranges_dialog(self):
+        previous, ok = QInputDialog.getInt(self, 'Onion Skins', 'Previous ghosts (0–6):',
+                                            self.onion_previous_input.value(), 0, 6)
+        if not ok:
+            return
+        following, ok = QInputDialog.getInt(self, 'Onion Skins', 'Next ghosts (0–6):',
+                                             self.onion_next_input.value(), 0, 6)
+        if ok:
+            self.onion_previous_input.setValue(previous)
+            self.onion_next_input.setValue(following)
+
+    def set_audio_volume_dialog(self):
+        volume, ok = QInputDialog.getInt(self, 'Audio Volume', 'Volume (%):',
+                                          self.audio_volume.value(), 0, 100)
+        if ok:
+            self.audio_volume.setValue(volume)
 
     def create_motion_object(self):
         try:
@@ -3295,14 +3439,14 @@ class MainWindow(QMainWindow):
     def toggle_tool_options(self):
         if not self.project_active:
             return
-        self.settings_scroll.setVisible(not self.settings_scroll.isVisible())
+        self._docks['tools'].setVisible(not self._docks['tools'].isVisible())
         self._save_workspace_layout()
         self.return_canvas_focus()
 
     def toggle_layers_panel(self):
         if not self.project_active:
             return
-        self.right_panel.setVisible(not self.right_panel.isVisible())
+        self._docks['layers'].setVisible(not self._docks['layers'].isVisible())
         self._save_workspace_layout()
         self.return_canvas_focus()
 
@@ -3421,7 +3565,7 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         def show_advanced():
             dialog.reject()
-            self.settings_scroll.show()
+            self._docks['tools'].show()
         edit_settings.clicked.connect(show_advanced)
         populate()
         dialog.exec()
@@ -3434,7 +3578,7 @@ class MainWindow(QMainWindow):
         action.triggered.connect(lambda: self._open_brush_library(False))
         brush_menu.addSeparator()
         action = brush_menu.addAction('Advanced Brush Settings…')
-        action.triggered.connect(lambda: self.settings_scroll.show())
+        action.triggered.connect(lambda: self._docks['tools'].show())
         brush_button = self.tool_buttons['brush']
         brush_button.setMenu(brush_menu)
         brush_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -3445,7 +3589,7 @@ class MainWindow(QMainWindow):
         action.triggered.connect(lambda: self._open_brush_library(True))
         eraser_menu.addSeparator()
         action = eraser_menu.addAction('Advanced Eraser Settings…')
-        action.triggered.connect(lambda: self.settings_scroll.show())
+        action.triggered.connect(lambda: self._docks['tools'].show())
         eraser_button = self.tool_buttons['eraser']
         eraser_button.setMenu(eraser_menu)
         eraser_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
@@ -3624,14 +3768,17 @@ class MainWindow(QMainWindow):
             return
         if not self.focus_mode:
             self.focus_restore = {w: w.isVisible() for w in
-                (self.top_toolbar, self.settings_scroll, self.right_panel,
-                 self.timeline_container, self.timeline_toggle, self.status)}
+                (self.top_toolbar, self.status, *self._docks.values())}
+            self._workspace_restoring = True
             for widget in self.focus_restore:
                 widget.hide()
+            self._workspace_restoring = False
             self.focus_mode = True
         else:
+            self._workspace_restoring = True
             for widget, was_visible in self.focus_restore.items():
                 widget.setVisible(was_visible)
+            self._workspace_restoring = False
             self.focus_restore = {}
             self.focus_mode = False
         self.canvas.setFocus()
@@ -3643,36 +3790,68 @@ class MainWindow(QMainWindow):
     def _workspace_key(self, panel):
         return f'workspaces/{self.workspace_mode.lower()}/{panel}'
 
+    def _dock_visibility_changed(self, name, shown):
+        if name == 'timeline':
+            self.timeline_toggle.setText('Hide Animation Timeline' if shown else 'Show Animation Timeline')
+        self._save_workspace_layout()
+
+    def _dock_floating_changed(self, name, floating):
+        self._save_workspace_layout()
+
     def _save_workspace_layout(self):
-        """Store only explicit panel visibility; not document or animation state."""
+        """Persist each workspace's docking and visibility, never project pixels."""
         if not self.project_active or self._workspace_restoring or self.focus_mode:
             return
-        for panel, widget in (('timeline', self.timeline_container),
-                              ('tools', self.settings_scroll),
-                              ('layers', self.right_panel)):
-            # isHidden measures direct visibility rather than ancestor visibility.
-            self.preferences.setValue(self._workspace_key(panel), not widget.isHidden())
+        self.preferences.setValue(self._workspace_key('dock_state'), self.saveState(30))
+        for name, dock in self._docks.items():
+            self.preferences.setValue(self._workspace_key(name), dock.isVisible())
         self.preferences.sync()
+
+    def _recover_offscreen_docks(self):
+        """Keep detached windows accessible when a monitor is disconnected."""
+        screens = QApplication.screens()
+        for dock in self._docks.values():
+            if dock.isFloating() and dock.isVisible():
+                rect = dock.frameGeometry()
+                if not any(screen.availableGeometry().intersected(rect).width() >= 50 and
+                           screen.availableGeometry().intersected(rect).height() >= 40 for screen in screens):
+                    dock.setFloating(False)
 
     def _restore_workspace_layout(self):
         if not self.project_active:
             return
         self._workspace_restoring = True
         try:
+            saved = self.preferences.value(self._workspace_key('dock_state'))
+            if saved is not None:
+                self.restoreState(saved, 30)
+            else:
+                for name, area in (('tools', Qt.DockWidgetArea.LeftDockWidgetArea),
+                                   ('layers', Qt.DockWidgetArea.RightDockWidgetArea),
+                                   ('timeline', Qt.DockWidgetArea.BottomDockWidgetArea)):
+                    dock = self._docks[name]
+                    dock.setFloating(False)
+                    self.addDockWidget(area, dock)
             defaults = {'timeline': self.workspace_mode == 'Animation',
                         'tools': False, 'layers': False}
-            for panel, widget in (('timeline', self.timeline_container),
-                                  ('tools', self.settings_scroll),
-                                  ('layers', self.right_panel)):
-                shown = self.preferences.value(self._workspace_key(panel),
-                                               defaults[panel], type=bool)
-                widget.setVisible(shown)
-            self.timeline_toggle.setText('Hide Animation Timeline' if not self.timeline_container.isHidden()
-                                         else 'Show Animation Timeline')
+            for name, dock in self._docks.items():
+                shown = self.preferences.value(self._workspace_key(name), defaults[name], type=bool)
+                dock.setVisible(shown)
+            self._recover_offscreen_docks()
             self.centralWidget().updateGeometry()
             self.canvas_scroll.viewport().update()
         finally:
             self._workspace_restoring = False
+
+    def reset_workspace_layout(self):
+        if not self.project_active:
+            return
+        self._workspace_restoring = True
+        for key in ('dock_state', 'tools', 'layers', 'timeline'):
+            self.preferences.remove(self._workspace_key(key))
+        self._workspace_restoring = False
+        self._restore_workspace_layout()
+        self._save_workspace_layout()
 
     def _select_workspace(self, name):
         if self.project_active:
@@ -3713,8 +3892,8 @@ class MainWindow(QMainWindow):
             self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def toggle_timeline(self):
-        visible = not self.timeline_container.isVisible()
-        self.timeline_container.setVisible(visible)
+        visible = not self._docks['timeline'].isVisible()
+        self._docks['timeline'].setVisible(visible)
         self.timeline_toggle.setText('Hide Animation Timeline' if visible else 'Show Animation Timeline')
         self._save_workspace_layout()
         # Widget visibility must not cause the top-level window to grow beyond the screen.
@@ -4245,14 +4424,18 @@ class MainWindow(QMainWindow):
         self.project_active = active
         self.workspace.setVisible(active)
         self.welcome.setVisible(not active)
-        self.timeline_toggle.setVisible(active)
+        self.timeline_toggle.setVisible(False)
         self.workspace_picker.setEnabled(active)
+        self.animation_menu.setEnabled(active)
         if active:
             # Each workspace remembers its own layout, with Drawing initially
             # timeline-free and Animation initially timeline-visible.
             self._restore_workspace_layout()
         else:
-            self.timeline_container.hide()
+            self._workspace_restoring = True
+            for dock in self._docks.values():
+                dock.hide()
+            self._workspace_restoring = False
             self.timeline_toggle.setText('Show Animation Timeline')
         for b in self.toolbar_buttons:
             if b.text() not in ('New', 'Open .las'):
