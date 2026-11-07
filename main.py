@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.31.0: recent projects and distribution readiness."""
+"""Linux Animation Studio v0.32.0: timeline thumbnail caching and profiling."""
 import io
 import wave
 import time
@@ -15,6 +15,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field
 from bisect import bisect_left
+from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.31.0"
+APP_VERSION = "0.32.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -193,6 +194,13 @@ class Canvas(QWidget):
         self._stamp_distance = 0.0
         self._stamp_rng = random.Random()
         self._stamp_cache = {}
+        # Small, bounded thumbnail cache. 120 full-canvas composites are expensive
+        # when a long timeline refreshes after editing a single cel. Cache only
+        # the 90x60 previews, never full-size QImages or mutable layer sources.
+        self._thumbnail_cache = OrderedDict()
+        self._thumbnail_cache_limit = 128
+        self._thumbnail_hits = 0
+        self._thumbnail_misses = 0
         self.brush_preset = 'Round'
         self.brush_settings = {name: {'size': size, 'opacity': opacity} for name, size, opacity in [('Round', 12, 100), ('Pencil', 9, 55), ('Ink', 6, 100), ('Airbrush', 32, 22)]}
         self.eraser = False
@@ -1676,7 +1684,38 @@ class Canvas(QWidget):
         self._apply(cmd, True)
         self._push(cmd)
 
+    def _thumbnail_signature(self, index):
+        """Track the visual content, not frame number alone.
+
+        QImage.cacheKey() changes on raster edits/copy-on-write, including linked
+        cels. Opacity/visibility and motion transforms also affect thumbnails.
+        This detects changes without keeping a second full-sized image in RAM.
+        """
+        layer_state = tuple(
+            (layer.id, layer.image.cacheKey(), layer.visible, layer.opacity)
+            for layer in self.frames[index]
+        )
+        motion_state = tuple(
+            (obj.id, obj.image.cacheKey(), interpolated_transform(obj.keys, index))
+            for obj in self.motion_objects
+        )
+        return (self.width_px, self.height_px, layer_state, motion_state)
+
+    def thumbnail_cache_stats(self):
+        """Simple counters for deterministic on-device performance checks."""
+        return dict(hits=self._thumbnail_hits, misses=self._thumbnail_misses,
+                    entries=len(self._thumbnail_cache))
+
     def frame_thumbnail(self, index):
+        if not 0 <= index < len(self.frames):
+            raise IndexError('Frame thumbnail index out of range')
+        # A live motion transform may preview unsaved positions; never cache it.
+        cacheable = self.transform_session is None
+        key = (index, self._thumbnail_signature(index)) if cacheable else None
+        if cacheable and key in self._thumbnail_cache:
+            self._thumbnail_hits += 1
+            self._thumbnail_cache.move_to_end(key)
+            return self._thumbnail_cache[key]
         result = QImage(self.width_px, self.height_px, IMAGE_FORMAT)
         result.fill(Qt.GlobalColor.white)
         p = QPainter(result)
@@ -1684,10 +1723,22 @@ class Canvas(QWidget):
             if layer.visible:
                 p.setOpacity(layer.opacity / 100.0)
                 p.drawImage(0, 0, layer.image)
+                p.setOpacity(1.0)
         self.draw_motion_objects(p, index)
         p.end()
-        return result.scaled(90, 60, Qt.AspectRatioMode.KeepAspectRatio,
-                             Qt.TransformationMode.SmoothTransformation)
+        result = result.scaled(90, 60, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        self._thumbnail_misses += 1
+        if cacheable:
+            # Remove older versions of this frame; a long editing session should
+            # not accumulate thumbnails of outdated brush strokes.
+            for old_key in list(self._thumbnail_cache):
+                if old_key[0] == index and old_key != key:
+                    del self._thumbnail_cache[old_key]
+            self._thumbnail_cache[key] = result
+            if len(self._thumbnail_cache) > self._thumbnail_cache_limit:
+                self._thumbnail_cache.popitem(last=False)
+        return result
 
     def render_frame(self, index, background=None):
         """Render a specific frame without changing the current frame or editor overlays."""
@@ -1704,6 +1755,7 @@ class Canvas(QWidget):
         return image
 
     def reset_document(self, width=WIDTH, height=HEIGHT):
+        self._thumbnail_cache.clear()
         self.color = QColor('#000000')
         self.cancel_transform()
         self.drawing = False
@@ -1910,6 +1962,7 @@ class Canvas(QWidget):
         stored_color = QColor(str(info.get('brush_color', '#000000')))
         self.color = stored_color if stored_color.isValid() else QColor('#000000')
         self.width_px, self.height_px = width, height
+        self._thumbnail_cache.clear()
         self.frames = frames
         self.motion_objects = motion_objects
         saved_motion = info.get('active_motion_id')

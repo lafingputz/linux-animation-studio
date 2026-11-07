@@ -1,8 +1,17 @@
-# Linux Animation Studio v0.31.0
+# Linux Animation Studio v0.32.0
 
-**Distribution & Workflow Refinement** (experimental installer candidate). Built on the validated v0.30.1 source with the `.las` project format **unchanged at version 6**.
+**Timeline Performance & Reliability** (testing candidate). Built on the validated v0.31.0 source with the `.las` project format **unchanged at version 6**.
 
-## What's new
+## What's new in v0.32
+
+- **Bounded timeline thumbnail cache:** Refreshing the timeline reuses 90×60 thumbnails for unchanged cels instead of compositing every full-size frame each time. Up to 128 thumbnails are retained (the maximum project timeline remains 120 frames), so a complete 120-frame refresh can benefit from the cache.
+- **Automatic visual invalidation:** Raster image changes are detected using Qt `QImage.cacheKey()`; layer visibility/opacity and motion transforms are included in the cache signature. A live motion-transform preview bypasses the cache, and opening or creating a project clears old thumbnails. Linked cel edits and undo/redo should refresh correctly.
+- **Performance diagnostics:** `python tools/benchmark_timeline.py` measures cold and warm 120-frame thumbnail passes and a single-frame edit at 1200×800. `tools/benchmark.py` remains unchanged for canvas compositing. Tests cover thumbnail caching and invalidation.
+- **Scope:** This release avoids changes to painting, audio synchronization, playback timing, project serialization, or installer architecture. These systems remain subject to regression testing. There is **no claimed measured speedup** until benchmarked on your machines.
+
+## Existing features preserved
+
+
 
 - **Recent Projects:** Welcome screen retains New/Open and displays up to 12 recently opened or saved `.las` files. Double-click a recent project, or select it and choose **Open Selected**. Missing files are flagged; you can remove an entry without deleting the actual document, or clear the whole list after confirmation. The list lives in your device-local `QSettings` preferences, not in `.las` project files.
 - **App identity:** A consistent LAS app icon is included in the source and passed to PyInstaller for native application shortcuts, window icons and packaged builds; the program still identifies its version in About and the title bar.
@@ -56,11 +65,11 @@ python tools/package_release.py --dry-run
 python tools/package_release.py
 ```
 
-**Windows:** Requires **Inno Setup 6**, specifically `ISCC.exe` on PATH or in its normal Program Files location. Output: `releases/LinuxAnimationStudio-0.31.0-windows-setup.exe`. The installer includes Start Menu and optional desktop shortcuts and supports uninstall. It does not sign the executable or automatically bundle FFmpeg.
+**Windows:** Requires **Inno Setup 6**, specifically `ISCC.exe` on PATH or in its normal Program Files location. Output: `releases/LinuxAnimationStudio-0.32.0-windows-setup.exe`. The installer includes Start Menu and optional desktop shortcuts and supports uninstall. It does not sign the executable or automatically bundle FFmpeg.
 
-**macOS:** Uses built-in `hdiutil` and outputs `releases/LinuxAnimationStudio-0.31.0-macos.dmg`. Open the disk image and drag the `.app` into `/Applications`. Unsigned applications may be blocked by Gatekeeper; test carefully in a local account. Apple developer signing/notarization is **not provided**.
+**macOS:** Uses built-in `hdiutil` and outputs `releases/LinuxAnimationStudio-0.32.0-macos.dmg`. Open the disk image and drag the `.app` into `/Applications`. Unsigned applications may be blocked by Gatekeeper; test carefully in a local account. Apple developer signing/notarization is **not provided**.
 
-**Linux:** Outputs `releases/LinuxAnimationStudio-0.31.0-linux.tar.gz` containing the native folder build, `run.sh`, `install.sh`, `uninstall.sh` and icon. Extract and run `./run.sh` to launch without installation, or `./install.sh` to install in the current user's `~/.local/share/` and create an applications-menu launcher. `./uninstall.sh` removes the local app/launcher and leaves preference and project data intact. This is an installable archive, **not an AppImage or system `.deb`**.
+**Linux:** Outputs `releases/LinuxAnimationStudio-0.32.0-linux.tar.gz` containing the native folder build, `run.sh`, `install.sh`, `uninstall.sh` and icon. Extract and run `./run.sh` to launch without installation, or `./install.sh` to install in the current user's `~/.local/share/` and create an applications-menu launcher. `./uninstall.sh` removes the local app/launcher and leaves preference and project data intact. This is an installable archive, **not an AppImage or system `.deb`**.
 
 **FFmpeg:** System FFmpeg or `LAS_FFMPEG_PATH` may be required for MP4 exports. `tools/build.py --ffmpeg /path/to/ffmpeg` can bundle a supplied executable; check redistribution/license conditions before publishing. Test FFmpeg independently on each build.
 

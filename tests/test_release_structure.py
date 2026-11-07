@@ -11,7 +11,7 @@ class ReleaseStructureTests(unittest.TestCase):
     def test_source_syntax_and_version(self):
         source = (ROOT / 'main.py').read_text(encoding='utf-8')
         ast.parse(source)
-        self.assertIn('APP_VERSION = "0.31.0"', source)
+        self.assertIn('APP_VERSION = "0.32.0"', source)
         self.assertIn('PROJECT_VERSION = 6', source)
         self.assertNotIn('palette(mid)', source)
 
