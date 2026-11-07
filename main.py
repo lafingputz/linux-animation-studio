@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.30.1: Wayland floating-dock grip and visible resize separators."""
+"""Linux Animation Studio v0.31.0: recent projects and distribution readiness."""
 import io
 import wave
 import time
@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.30.1"
+APP_VERSION = "0.31.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2988,6 +2988,28 @@ class MainWindow(QMainWindow):
         open_button = QPushButton('Open Project')
         open_button.clicked.connect(self.open_project)
         welcome_layout.addWidget(open_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        recent_heading = QLabel('Recent Projects')
+        recent_heading.setStyleSheet('font-size: 15px; font-weight: 600; margin-top: 16px;')
+        welcome_layout.addWidget(recent_heading, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.recent_projects_list = QListWidget()
+        self.recent_projects_list.setToolTip('Double-click a recent .las project to open it')
+        self.recent_projects_list.setMinimumWidth(310)
+        self.recent_projects_list.setMaximumWidth(570)
+        self.recent_projects_list.setMaximumHeight(180)
+        self.recent_projects_list.itemDoubleClicked.connect(self._open_recent_item)
+        welcome_layout.addWidget(self.recent_projects_list, alignment=Qt.AlignmentFlag.AlignCenter)
+        recent_controls = QHBoxLayout()
+        reopen_button = QPushButton('Open Selected')
+        reopen_button.clicked.connect(self._open_selected_recent)
+        recent_controls.addWidget(reopen_button)
+        forget_button = QPushButton('Remove from List')
+        forget_button.clicked.connect(self._remove_selected_recent)
+        recent_controls.addWidget(forget_button)
+        clear_button = QPushButton('Clear List')
+        clear_button.clicked.connect(self._clear_recent_projects)
+        recent_controls.addWidget(clear_button)
+        welcome_layout.addLayout(recent_controls)
+        self._refresh_recent_projects()
         welcome_layout.addStretch()
         vertical.addWidget(self.welcome, 1)
         self.welcome.hide()
@@ -4552,6 +4574,105 @@ class MainWindow(QMainWindow):
             return True
         return self.save_project()
 
+    # Recent documents are local UI preferences, not serialized in the .las file.
+    RECENT_LIMIT = 12
+
+    def _recent_paths(self):
+        stored = self.preferences.value('recent_projects/paths', [])
+        if isinstance(stored, str):
+            stored = [stored] if stored else []
+        return [str(p) for p in stored if str(p).strip()][:self.RECENT_LIMIT]
+
+    def _save_recent_paths(self, paths):
+        unique = list(dict.fromkeys(str(Path(p).expanduser().resolve()) for p in paths))
+        self.preferences.setValue('recent_projects/paths', unique[:self.RECENT_LIMIT])
+        self.preferences.sync()
+        self._refresh_recent_projects()
+
+    def _remember_project(self, path):
+        if not path:
+            return
+        absolute = str(Path(path).expanduser().resolve())
+        self._save_recent_paths([absolute] + [p for p in self._recent_paths() if p != absolute])
+
+    def _refresh_recent_projects(self):
+        if not hasattr(self, 'recent_projects_list'):
+            return
+        self.recent_projects_list.clear()
+        for path in self._recent_paths():
+            file = Path(path)
+            entry = QListWidgetItem(f'{file.name}  ·  {file.parent}')
+            entry.setData(Qt.ItemDataRole.UserRole, path)
+            if not file.is_file():
+                entry.setText(f'⚠ Missing: {file.name}  ·  {file.parent}')
+                entry.setForeground(QColor('#bd7474'))
+                entry.setToolTip('File is missing. Remove this entry or locate the project.')
+            else:
+                entry.setToolTip(path)
+            self.recent_projects_list.addItem(entry)
+
+    def _open_recent_item(self, item):
+        if item is not None:
+            self._open_path(str(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _open_selected_recent(self):
+        self._open_recent_item(self.recent_projects_list.currentItem())
+
+    def _remove_selected_recent(self):
+        item = self.recent_projects_list.currentItem()
+        if item is None:
+            return
+        target = str(item.data(Qt.ItemDataRole.UserRole))
+        self._save_recent_paths([p for p in self._recent_paths() if p != target])
+
+    def _clear_recent_projects(self):
+        if not self._recent_paths():
+            return
+        answer = QMessageBox.question(self, 'Clear recent projects?',
+            'Remove all recent project shortcuts? Your project files will not be deleted.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._save_recent_paths([])
+
+    def _open_path(self, path):
+        if not path:
+            return
+        if not Path(path).is_file():
+            answer = QMessageBox.warning(self, 'Project not found',
+                f'This project no longer exists at:\n{path}\n\nRemove it from Recent Projects?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._save_recent_paths([p for p in self._recent_paths() if p != path])
+            return
+        if not self._confirm_discard():
+            return
+        # Loading may fail; retain the active document rather than discard it.
+        # Keep the old document until the source archive has been checked.
+        try:
+            with zipfile.ZipFile(path) as archive:
+                bad = archive.testzip()
+                if bad:
+                    raise ValueError(f'Corrupt project archive entry: {bad}')
+                manifest = json.loads(archive.read('manifest.json').decode('utf-8'))
+                if manifest.get('format') != 'linux-animation-studio':
+                    raise ValueError('This is not a Linux Animation Studio project')
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+            QMessageBox.critical(self, 'Open failed', f'Could not read project:\n{exc}')
+            return
+        self.pause_playback()
+        try:
+            self.canvas.load_project(path)
+            self.update_color_swatch()
+            self._reload_audio()
+            self.project_path = path
+            self._set_project_active(True)
+            self._remember_project(path)
+            self.status.setText(f'Opened: {path}')
+        except Exception as exc:
+            QMessageBox.critical(self, 'Open failed', str(exc))
+
     def new_project(self):
         width, ok = QInputDialog.getInt(self, 'New Project', 'Canvas width (px):',
                                         WIDTH, 1, 8192)
@@ -4584,18 +4705,8 @@ class MainWindow(QMainWindow):
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(self, 'Open editable project',
                                               str(Path.home()), 'LAS projects (*.las)')
-        if not path or not self._confirm_discard():
-            return
-        self.pause_playback()
-        try:
-            self.canvas.load_project(path)
-            self.update_color_swatch()
-            self._reload_audio()
-            self.project_path = path
-            self._set_project_active(True)
-            self.status.setText(f'Opened: {path}')
-        except Exception as exc:
-            QMessageBox.critical(self, 'Open failed', str(exc))
+        if path:
+            self._open_path(path)
 
     def save_project_as(self):
         if not self.project_active:
@@ -4613,6 +4724,7 @@ class MainWindow(QMainWindow):
         try:
             self.canvas.save_project(path)
             self.project_path = path
+            self._remember_project(path)
             self.refresh_title()
             self.status.setText(f'Saved: {path}')
             return True
@@ -4887,6 +4999,11 @@ if __name__ == '__main__':
     QCoreApplication.setOrganizationName('LinuxAnimationStudio')
     QCoreApplication.setApplicationName('LinuxAnimationStudio')
     app = QApplication(sys.argv)
+    # PyInstaller extracts --add-data assets to _MEIPASS.
+    asset_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+    icon_file = asset_root / 'assets' / 'las.png'
+    if icon_file.is_file():
+        app.setWindowIcon(QIcon(str(icon_file)))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

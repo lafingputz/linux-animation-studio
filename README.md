@@ -1,34 +1,20 @@
-# Linux Animation Studio v0.30.1
+# Linux Animation Studio v0.31.0
 
-**Dockable Workspaces, Compact Animation Menu & Batch Frames.** Based on the user-tested v0.29.0 source. The `.las` project format remains **v6**, and the existing drawing, Color Studio, playback, exposure, audio, and export functionality is retained.
-
-
-## v0.30.1 Linux docking usability patch
-
-- **Wayland floating panel movement:** On Linux Wayland, floating Timeline, Tools, and Layers docks now use a high-contrast custom grip labeled with the panel name. Press and drag the grip to request a compositor-managed window move using `QWindow.startSystemMove()`. Use the new **Dock** button (or double-click the grip) to reattach a panel; **×** hides it. The custom grip is active only on Wayland floating docks, so Windows and macOS keep the native Qt docking title bars.
-- **Visible resize boundaries:** Native QMainWindow dock separators are now 9 pixels wide/high with a contrasting default and hover color. The edges remain true Qt resize handles, not visual decorations.
-- **Existing layouts protected:** The current dock state, workspace visibility, detached-window recovery, Canvas Focus Mode, and project format v6 are unchanged.
-- **Regression checks:** Added `tests/test_dock_grip.py`, checking the compositor move call, Linux-only activation, redock action, and separator rules.
-
-**Testing caveat:** Wayland move requests depend on the compositor supporting `startSystemMove()`. If it still refuses to move, try the Wayland window manager's native move gesture (often Super+drag) and report which compositor/session you're using. The custom title bar offers a direct redock control even if moving is unavailable.
-
-**Primary acceptance tests:** (1) On Linux Wayland, float each dock and drag by the blue grip; (2) resize via the clearly colored dock divider using Wacom/mouse; (3) redock with Dock and check the normal dock title; (4) test panel visibility, workspace persistence, Reset Workspace Layout, and `Tab` focus; (5) confirm Windows docking behaves unchanged and test on macOS.
+**Distribution & Workflow Refinement** (experimental installer candidate). Built on the validated v0.30.1 source with the `.las` project format **unchanged at version 6**.
 
 ## What's new
 
-- **Resizable/dockable/floating Timeline, Tools, and Layers:** Native Qt dock widgets are movable by their title bars. Resize from the edges, detach into floating windows, drag to a second monitor, and redock. `View` menu exposes all three panels plus **Reset Workspace Layout**.
-- **Independent workspace layouts:** Drawing and Animation continue to use their own saved visibility and now also remember dock positions, sizes, and floating state in local `QSettings`. On startup, the app still opens with no project; Drawing initially hides all three docks, and Animation initially shows the timeline. Floating windows no longer on a connected monitor are redocked when restoring a workspace.
-- **Frames + audio visible together:** The audio waveform is now beneath the frame thumbnails instead of inside a mutually exclusive tab. Expand the dock upward to see more of both simultaneously. The Audio tab still contains audio metadata/settings; import/removal, mute, and volume are in the Animation menu.
-- **Animation menu:** Frame navigation, playback, blank/duplicate/delete/add-multiple, exposure/hold/link operations, onion ghost range settings, audio, and motion commands have moved into the top-level **Animation** menu. The timeline retains **FPS**, **Go to Frame**, **Loop**, **Onion skins**, and **Ghost opacity** and tabbed track/parameter views. Multi-frame editing is a checkable menu action; the visible status indicator continues to warn when it is active.
-- **Batch blank frames:** **Animation → Add Multiple Frames…** accepts a number and a placement choice (after current / append to end). Insertion is one undo step, respects the existing 120-frame limit, shifts later frames and motion-object keyframes, and leaves earlier cels intact. Audio remains aligned to absolute timeline time; inserting frames does **not** automatically time-stretch or reposition an imported audio clip.
-- **Customizable shortcuts:** Defaults include `Alt+N` blank, `Alt+D` duplicate, `Alt+Shift+N` multiple frames, `Alt+Backspace` delete, `Shift+P` stop, and existing `P` play/pause, `,` / `.` adjacent frame, `<` / `>` first/last frame. Customize these in **Edit → Keyboard Shortcuts…**. Additional menu commands remain accessible with the mouse and can gain user-defined shortcuts in later releases.
-- **Same export and packaging utilities:** PyInstaller helpers and the v0.29 export optimization remain. New dependency-free tests cover a batch-frame insert/undo/redo transaction and dock/menu source wiring.
+- **Recent Projects:** Welcome screen retains New/Open and displays up to 12 recently opened or saved `.las` files. Double-click a recent project, or select it and choose **Open Selected**. Missing files are flagged; you can remove an entry without deleting the actual document, or clear the whole list after confirmation. The list lives in your device-local `QSettings` preferences, not in `.las` project files.
+- **App identity:** A consistent LAS app icon is included in the source and passed to PyInstaller for native application shortcuts, window icons and packaged builds; the program still identifies its version in About and the title bar.
+- **Installer packaging:** New `tools/package_release.py` builds a Windows Inno Setup 6 installer (`.exe`), a macOS drag-to-Applications `.dmg` with `hdiutil`, or a portable Linux `.tar.gz` with optional per-user desktop installer/uninstaller scripts. Packaging must be run *on the target OS* after `tools/build.py`, using local native tools. None of the release packages are signed/notarized.
+- **Diagnostics:** Existing `tools/doctor.py`, packaging verification, automated `.las` regression tests and performance benchmarking are preserved. The new distribution checks cover installer plans and asset presence.
+- **Compatibility:** Existing Wayland panel grips, resizable/floating docks, independent workspaces, Color Studio, Wacom drawing, frame/audio tools, import and export logic are unchanged.
 
-## Source installation
+## Project source setup
 
-Replace your tracked source files with the ZIP contents in GitHub, preserving the `tests/` and `tools/` folders. Commit, then pull on each machine. Python 3.12 and your existing virtual environment are recommended.
+Extract **all** ZIP files and directories to your GitHub project, preserving `assets/`, `tests/` and `tools/`.
 
-### Linux / Pop!_OS
+### Linux / Surface Pro 3
 
 ```bash
 cd ~/Projects/linux-animation-studio
@@ -37,7 +23,7 @@ source .venv/bin/activate
 python main.py
 ```
 
-### Windows / PowerShell
+### Windows 11 / PowerShell
 
 ```powershell
 cd "C:\path\to\linux-animation-studio"
@@ -45,7 +31,7 @@ git pull --ff-only
 .\.venv\Scripts\python.exe main.py
 ```
 
-### macOS / Terminal
+### macOS / Apple Silicon
 
 ```bash
 cd /path/to/linux-animation-studio
@@ -53,29 +39,44 @@ git pull --ff-only
 ./.venv/bin/python main.py
 ```
 
-The Windows/macOS paths are placeholders.
+Change example paths to match your repository.
 
-## Verification
+## Build and package
+
+Use your virtual environment's Python, substituting `./.venv/bin/python` on macOS or `.\.venv\Scripts\python.exe` on Windows:
 
 ```bash
+python -m pip install -r requirements-build.txt
+python tools/doctor.py
 python -m unittest discover -s tests -v
 python tools/build.py --dry-run
+python tools/build.py
+python tools/check_build.py
+python tools/package_release.py --dry-run
+python tools/package_release.py
 ```
 
-On macOS/Windows, substitute the corresponding venv Python executable if `python` isn't found. Use `python tools/build.py` to create a native app; do so on the target OS. The output remains experimental and needs device-specific verification.
+**Windows:** Requires **Inno Setup 6**, specifically `ISCC.exe` on PATH or in its normal Program Files location. Output: `releases/LinuxAnimationStudio-0.31.0-windows-setup.exe`. The installer includes Start Menu and optional desktop shortcuts and supports uninstall. It does not sign the executable or automatically bundle FFmpeg.
 
-**Local release validation:** Source compiled; lightweight dependency-free tests passed; packaging dry-run passed. The complete test suite's PySide6-dependent project tests and Qt GUI cannot run in the packaging environment because PySide6 was unavailable. Native docking behavior, multiple-monitor restoration, input, audio, and packaged builds must be checked on your devices.
+**macOS:** Uses built-in `hdiutil` and outputs `releases/LinuxAnimationStudio-0.31.0-macos.dmg`. Open the disk image and drag the `.app` into `/Applications`. Unsigned applications may be blocked by Gatekeeper; test carefully in a local account. Apple developer signing/notarization is **not provided**.
 
-## Suggested v0.30 acceptance checks
+**Linux:** Outputs `releases/LinuxAnimationStudio-0.31.0-linux.tar.gz` containing the native folder build, `run.sh`, `install.sh`, `uninstall.sh` and icon. Extract and run `./run.sh` to launch without installation, or `./install.sh` to install in the current user's `~/.local/share/` and create an applications-menu launcher. `./uninstall.sh` removes the local app/launcher and leaves preference and project data intact. This is an installable archive, **not an AppImage or system `.deb`**.
 
-1. Startup: no project open; Drawing hides all docks, Animation reveals timeline.
-2. Resize timeline vertically: see thumbnail strip and audio waveform simultaneously; drag the dock's edge upward and downward.
-3. Float each panel; move timeline to a second Windows monitor; redock the three panels.
-4. Customize layouts independently in Drawing/Animation; restart LAS and verify both persist. Disconnect second monitor and confirm recovery.
-5. `View → Reset Workspace Layout` should recover a docked, usable default.
-6. Test `Tab` Focus Mode with docked/floating panels and verify previous visibility restores.
-7. Add multiple blank frames after current and at end, test upper limit of 120, undo/redo in one step, verify motion keyframes shift and that existing art remains.
-8. Verify Animation menu covers existing commands, shortcuts can be remapped, and the compact timeline leaves visible FPS, Go to, Loop, Onion Skin, ghost opacity.
-9. Test Wacom/mouse input, layers, linked cels, exposure dragging, onion skins, playback, audio sync, `.las` save/load, high-FPS PNG/MP4 exports, cross-platform source launch and packaged builds.
+**FFmpeg:** System FFmpeg or `LAS_FFMPEG_PATH` may be required for MP4 exports. `tools/build.py --ffmpeg /path/to/ffmpeg` can bundle a supplied executable; check redistribution/license conditions before publishing. Test FFmpeg independently on each build.
 
-**Status:** v0.30.1 test candidate. Mac pen-tablet pressure remains unverified on supported Mac hardware. Signing/notarization and clean-machine public distribution are not yet validated.
+**Clean-machine verification:** Copy packages to a separate clean user account or OS machine without your Python virtual environment; confirm launching, saving/opening `.las`, audio, exports, uninstall and absence of missing dynamic libraries. Packaging checks only verify structure, not that these workflows succeed.
+
+## Acceptance test suggestions
+
+1. Fresh launch with no project; New/Open; recent projects empty on first use and populate after first save/open.
+2. Save two files, restart, reopen via recent list. Oldest-first? Confirm most recent appears at top and no duplicates on repeated openings.
+3. Rename/move a project externally; verify missing-file status and removal don't delete any files.
+4. Open a malformed or unsupported `.las`; expect a useful error, no silently lost existing artwork.
+5. Test your previous dock layout and animation tools, shortcuts, color palettes, waveform, MP4 audio and Wacom pressure.
+6. Run full unittest suite; report results. Build the native app and the installer/package on each OS.
+7. Install from the native package (not source directory), launch without Python env, test opening and editing projects, export MP4 using FFmpeg.
+8. Test uninstall on Windows/Linux and moving the macOS app into Applications. Verify project data and brushes are preserved.
+
+## Verification status
+
+Python static compilation and dependency-free test suites can run without PySide6. GUI tests and the native packaging processes must be executed on the corresponding OS and remain pending until user hardware testing. No signing/notarization or cross-platform distribution guarantees are implied.

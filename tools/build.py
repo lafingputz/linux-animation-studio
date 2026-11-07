@@ -28,6 +28,14 @@ def main():
     cmd = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--windowed',
            '--onedir', '--name', APP, '--distpath', str(dist), '--workpath', str(ROOT / 'build'),
            '--specpath', str(ROOT), str(ROOT / 'main.py')]
+    # Package the app identity asset for the welcome window, taskbar and docks.
+    icon = ROOT / 'assets' / ('las.ico' if sys.platform == 'win32' else
+                               'las.icns' if sys.platform == 'darwin' else 'las.png')
+    if icon.is_file():
+        cmd.extend(['--icon', str(icon)])
+    asset_dir = ROOT / 'assets'
+    if asset_dir.is_dir():
+        cmd.extend(['--add-data', f'{asset_dir}{os.pathsep}assets'])
     print('Building on:', sys.platform)
     print('Command:', ' '.join(map(str, cmd)))
     if args.dry_run:

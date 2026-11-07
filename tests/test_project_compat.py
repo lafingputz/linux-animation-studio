@@ -8,10 +8,15 @@ import uuid
 import zipfile
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QColor
-from main import Canvas, PROJECT_VERSION, png_bytes, transparent_image
+try:
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QColor
+    from main import Canvas, PROJECT_VERSION, png_bytes, transparent_image
+    QT_AVAILABLE = True
+except ImportError:
+    QT_AVAILABLE = False
 
+@unittest.skipUnless(QT_AVAILABLE, "PySide6 is not installed; run GUI project tests in the LAS virtual environment")
 class ProjectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
