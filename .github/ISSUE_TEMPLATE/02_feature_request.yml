@@ -1,0 +1,39 @@
+name: "Feature request"
+description: "Suggest a drawing, animation, or workflow improvement for LAS"
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping shape Linux Animation Studio! Check existing issues for similar ideas.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: "Describe the workflow that could be easier or isn't possible today"
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: What would you like LAS to do?
+      description: "Describe the feature and how you expect it to behave"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where would this fit?
+      options:
+        - Drawing / brushes
+        - Animation / timeline
+        - Layers / selections / transform
+        - Audio / exports
+        - Interface / workspaces
+        - Installation / platform compatibility
+        - Other
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples or reference images (optional)
+      description: "Add sketches, screenshots or links that clarify the idea"

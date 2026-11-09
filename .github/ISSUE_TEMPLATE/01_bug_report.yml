@@ -1,0 +1,71 @@
+name: "Bug report"
+description: "Report something in LAS that isn't behaving as expected"
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping test Linux Animation Studio! Search existing issues before submitting.
+        Please do not post private project files, personal paths, passwords, or sensitive information.
+  - type: input
+    id: version
+    attributes:
+      label: LAS version
+      description: "Find this in Help > About or Help > Copy System Information"
+      placeholder: "e.g. 0.33.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: How is LAS installed?
+      options:
+        - Installer / standalone application
+        - Python source / virtual environment
+        - Not sure
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: "Describe the problem, including any error messages"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: "List the steps, starting from opening LAS when possible"
+      placeholder: |
+        1. Open a project
+        2. Select ...
+        3. Click ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: System information (optional)
+      description: "Help > Copy System Information in LAS; inspect before pasting"
+      render: text
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or recordings (optional)
+      description: "Drag images or short clips into this box; remove personal details first"
