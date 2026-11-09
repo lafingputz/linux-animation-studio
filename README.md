@@ -1,6 +1,28 @@
-# Linux Animation Studio v0.33.0
+# Linux Animation Studio v0.33.1
 
 **Beta Feedback & GitHub Issue Reporting** (test candidate). Based on validated v0.32.0. LAS `.las` format **remains v6**; no modifications were made to rendering, brushes, timeline behavior, audio, or project serialization.
+
+## New in v0.33.1: Selection Clearing & Clear Layer
+
+- **Delete** or **Backspace** clears only the selected pixels of the active raster cel. If nothing is selected, neither key erases artwork.
+- **Edit → Clear Selected Pixels** provides a menu alternative.
+- **Edit → Clear Active Cel / Layer** clears the entire current cel, regardless of selection. Static layers intentionally clear across all frames because their artwork is shared.
+- Undo/redo handles clearing in one step and restores **all linked exposures** together.
+- Multi-frame Edit operates on selected frames only when explicitly enabled. Repeated linked exposures are edited once.
+- Rectangle and lasso selections preserve their clipping masks, including antialiased edges; edits invalidate timeline thumbnails.
+- Both deletion shortcuts can be customized under **Edit → Keyboard Shortcuts**. Text inputs are protected from those shortcuts.
+- The GitHub reporting destination remains `lafingputz/linux-animation-studio`. Project format is still `.las` v6.
+
+### Quick verification for v0.33.1
+
+1. Draw on the active cel, Ctrl+A, press Delete, Undo and Redo; repeat with Backspace.
+2. Select a small rectangle or freehand lasso and delete only that area's pixels.
+3. With no selection, pressing Delete does nothing to artwork.
+4. Edit → Clear Active Cel / Layer clears the entire active cel and is undoable, including from a partial selection.
+5. Unlinked frame cels remain unchanged; linked exposures and static layers clear together and undo together.
+6. Enable Multi-frame Edit with multiple frames selected, clear, and undo as one step. Disable it and verify only the active cel changes.
+7. Open a text entry field (such as a brush name/number) and verify Delete/Backspace edit text rather than artwork.
+8. Check that thumbnail caching, drawing, audio, export, saving/opening `.las` v6, and native packaging still work on all three desktop platforms.
 
 ## New in v0.33
 
@@ -11,31 +33,27 @@
 - The Windows test-suite UTF-8 decoding issue in `tests/test_distribution31.py` is corrected.
 - Existing v0.32 thumbnail caching, dockable workspaces, Color Studio, frame tools, installers, and compatibility tests are preserved.
 
-## Important: Set your REAL GitHub repository before distributing a beta
+## GitHub repository preconfigured
 
-The source package deliberately **does not invent your repository URL**. Before building and sharing installers, open **`assets/feedback.json`** and set the repository identifier:
+LAS feedback links now default to the official repository **`lafingputz/linux-animation-studio`**. You do **not** need to edit `assets/feedback.json` before packaging this release or future releases that retain this setting:
 
 ```json
 {
-  "repository": "YOUR_GITHUB_ACCOUNT/YOUR_REPOSITORY"
+  "repository": "lafingputz/linux-animation-studio"
 }
 ```
 
-For example, use the `owner/repo` portion of your own GitHub repository's URL. Replace *both* placeholder words. The default is an empty string, meaning no public destination is preconfigured. **Do not distribute the app with an empty value if you expect one-click bug reporting.**
+The `tools/build.py` PyInstaller helper includes the `assets/` directory in native builds. An existing user-specific choice made through **Help → Configure Feedback Repository…** takes precedence over the bundled default; users who previously changed the destination can restore the official repository there.
 
-The `tools/build.py` PyInstaller helper already includes the full `assets/` folder in each native application build. **Rebuild the application and its installer after editing the JSON file.** If you change the JSON only in the source repository, already-built installations will not update their bundled copy. If an individual machine has a repository set in **Help → Configure Feedback Repository…**, that saved local override takes precedence.
-
-If the maintainer doesn't set a repository, LAS prompts users to configure a destination rather than opening a guessed site. The GitHub issue URLs are:
-
-- `https://github.com/OWNER/REPO/issues/new?template=01_bug_report.yml`
-- `https://github.com/OWNER/REPO/issues/new?template=02_feature_request.yml`
+- Bug reports: `https://github.com/lafingputz/linux-animation-studio/issues/new?template=01_bug_report.yml`
+- Feature requests: `https://github.com/lafingputz/linux-animation-studio/issues/new?template=02_feature_request.yml`
 
 ### GitHub setup
 
 1. Commit **the entire `.github/ISSUE_TEMPLATE/` directory**, including both `.yml` forms and `config.yml`, to your repository's **default branch**. Some GitHub upload interfaces hide dot-folders, so check carefully.
 2. In GitHub repository **Settings → General → Features**, ensure **Issues** is enabled. For ordinary outside beta testers to create issues, the repository must permit their issue submissions; a public repository is the straightforward choice.
 3. Visit the repository's **Issues → New issue** page and confirm both forms appear. Submit one test issue for each category, or preview and discard before submitting.
-4. Edit `assets/feedback.json` with the actual `owner/repo`, build and package native apps, then click Help → Report a Bug / Request a Feature from an **installed** build.
+4. Build and package native apps with the already configured repository, then click Help → Report a Bug / Request a Feature from an **installed** build.
 5. Test with a non-maintainer GitHub account to ensure contributors have permission to open issues. GitHub requires testers to sign in to submit issues. For friends who don't want GitHub accounts, consider a separate optional web form later.
 
 The issue forms do not automatically create GitHub labels, and do not require repository credentials/API tokens. These links open the default browser; GitHub handles authentication and submission.
@@ -86,17 +104,17 @@ python tools/package_release.py --dry-run
 python tools/package_release.py
 ```
 
-- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.33.0-windows-setup.exe`.
-- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.33.0-macos.dmg`. Signing/notarization is not included.
-- Linux produces `releases/LinuxAnimationStudio-0.33.0-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
+- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.33.1-windows-setup.exe`.
+- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.33.1-macos.dmg`. Signing/notarization is not included.
+- Linux produces `releases/LinuxAnimationStudio-0.33.1-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
 - FFmpeg may still require the system installation or `LAS_FFMPEG_PATH`; installing LAS does not automatically install FFmpeg.
 
-## Acceptance tests for v0.33
+## Previous v0.33 feedback regression tests
 
 1. GitHub Issues: Both issue forms appear on GitHub under Issues → New issue after the templates are on the default branch.
 2. Form validation: Required reproduction/description fields work; optional diagnostic and screenshot fields remain optional.
 3. Configured reports: On Windows, Linux, and macOS, Help → Report a Bug and Help → Request a Feature open the correct repository/template in the default browser.
-4. Unconfigured reports: A blank `assets/feedback.json` prompts for configuration, rather than opening a broken/fabricated link.
+4. Default destination: New source and installed builds point to `lafingputz/linux-animation-studio`; an explicitly unconfigured destination prompts for configuration instead of opening an invalid link.
 5. Diagnostics: Help → Copy System Information displays meaningful version and platform data; contents appear on clipboard only when clicked. No artwork or sensitive paths included.
 6. Settings persistence: A configured GitHub repository survives app restart; source and packaged installation behavior are correct.
 7. Unit tests: Run the full suite, including the new dependency-free feedback tests and the Windows UTF-8 test fix.

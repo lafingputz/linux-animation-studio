@@ -53,8 +53,13 @@ class FeedbackTests(unittest.TestCase):
                         'Configure Feedback Repository…', 'QDesktopServices.openUrl(QUrl(url))',
                         'QApplication.clipboard().setText(diagnostics)']:
             self.assertIn(element, main)
-        self.assertIn('APP_VERSION = "0.33.0"', main)
+        self.assertIn('APP_VERSION = "0.33.1"', main)
         self.assertIn('PROJECT_VERSION = 6', main)
+
+    def test_official_repository_is_packaged_by_default(self):
+        self.assertEqual(read_packaged_repository(ROOT), 'lafingputz/linux-animation-studio')
+        self.assertEqual(feedback_url(read_packaged_repository(ROOT), 'bug'),
+                         'https://github.com/lafingputz/linux-animation-studio/issues/new?template=01_bug_report.yml')
 
     def test_github_forms_present(self):
         base = ROOT / '.github' / 'ISSUE_TEMPLATE'

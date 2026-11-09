@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.33.0: beta feedback and diagnostics."""
+"""Linux Animation Studio v0.33.1: selected-pixel clearing and active-cel clearing."""
 import io
 import wave
 import time
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 
-APP_VERSION = "0.33.0"
+APP_VERSION = "0.33.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -733,6 +733,9 @@ class Canvas(QWidget):
         for cmd in self._undo + self._redo:
             if cmd['type'] == 'patch':
                 total += cmd['before'].sizeInBytes() + cmd['after'].sizeInBytes()
+            elif cmd['type'] == 'cel_clear':
+                total += sum(change['before'].sizeInBytes() + change['after'].sizeInBytes()
+                             for change in cmd['changes'])
             elif cmd['type'] in ('add', 'remove'):
                 total += cmd['layer'].image.sizeInBytes()
             elif cmd['type'] in ('frame_add', 'frame_delete'):
@@ -968,6 +971,20 @@ class Canvas(QWidget):
             p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
             p.drawImage(cmd['rect'].topLeft(), cmd['after'] if forward else cmd['before'])
             p.end()
+        elif typ == 'cel_clear':
+            # Replace every exposure in the edited cel group with the same image.
+            # Painting on only one frame's QImage detaches Qt's implicitly shared
+            # buffer and can silently break linked cels and static layers.
+            for change in cmd['changes']:
+                source = change['after'] if forward else change['before']
+                image = source.copy()
+                for frame_layers in self.frames:
+                    for peer in frame_layers:
+                        if peer.id == change['id'] and (
+                                peer.mode == 'static' and change['mode'] == 'static'
+                                or peer.mode != 'static' and change['mode'] != 'static'
+                                and peer.cel_id == change['cel_id']):
+                            peer.image = image
         elif typ in ('add', 'remove'):
             insert = (typ == 'add') == forward
             for frame in self.frames:
@@ -1353,23 +1370,72 @@ class Canvas(QWidget):
             self.active_id = layer_id
             self.document_changed.emit()
 
-    def clear(self):
-        if self.drawing:
-            return
+    def _clear_raster(self, selection_only):
+        """Clear pixels on unique active-layer cels, preserving linked exposures.
+
+        Delete/Backspace require a selection. Explicit Clear Active Cel / Layer
+        clears the complete cel irrespective of selection. A static layer is one
+        shared image across the entire timeline. Multi-frame edit is opt-in.
+        """
+        if (self.playing or self.drawing or self.transform_session is not None
+                or self.drag_origin is not None):
+            return False
         layer = self.active_layer()
-        if not layer:
-            return
-        before = layer.image.copy()
-        after = transparent_image(self.width_px, self.height_px)
-        if before == after:
-            return
-        for frame in self.frames:
-            for peer in frame:
-                if peer.id == layer.id and peer.cel_id == layer.cel_id:
-                    peer.image = after
-        self._push(dict(type='patch', id=layer.id, rect=layer.image.rect(), before=before, after=after.copy()))
-        self.update()
-        self.frames_changed.emit()
+        if layer is None:
+            return False
+        if selection_only and (self.selection is None or self.selection_mask is None):
+            self.diagnostic.emit('Select an area before pressing Delete or Backspace.')
+            return False
+        indices = [self.frame_index]
+        if (getattr(self, 'multi_edit_enabled', False) and
+                len(getattr(self, 'multi_edit_frames', [])) > 1 and layer.mode != 'static'):
+            indices = sorted(set(indices + [index for index in self.multi_edit_frames
+                                            if 0 <= index < len(self.frames)]))
+        bounds = (self.selection.intersected(QRect(0, 0, self.width_px, self.height_px))
+                  if selection_only else QRect(0, 0, self.width_px, self.height_px))
+        if bounds.isEmpty():
+            return False
+        changes = []
+        seen = set()
+        for index in indices:
+            target = next((item for item in self.frames[index] if item.id == layer.id), None)
+            if target is None:
+                continue
+            key = (target.id, 'static' if target.mode == 'static' else target.cel_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            before = target.image.copy()
+            after = before.copy()
+            painter = QPainter(after)
+            if selection_only:
+                # DestinationOut retains partial antialiased lasso edges.
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+                painter.drawImage(bounds.topLeft(), self.selection_mask.copy(bounds))
+            else:
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+                painter.fillRect(after.rect(), Qt.GlobalColor.transparent)
+            painter.end()
+            if before == after:
+                continue
+            changes.append(dict(id=target.id, cel_id=target.cel_id, mode=target.mode,
+                                before=before, after=after))
+        if not changes:
+            return False
+        command = dict(type='cel_clear', changes=changes)
+        self._apply(command, True)
+        self._push(command)
+        return True
+
+    def clear_selected_pixels(self):
+        return self._clear_raster(selection_only=True)
+
+    def clear_active_cel(self):
+        return self._clear_raster(selection_only=False)
+
+    def clear(self):
+        """Backwards-compatible explicit clear action for the active cel."""
+        return self.clear_active_cel()
 
     def tabletEvent(self, event):
         typ = event.type()
@@ -3316,6 +3382,11 @@ class MainWindow(QMainWindow):
             if shortcut:
                 action.setShortcut(QKeySequence(shortcut))
         editmenu = self.menuBar().addMenu('&Edit')
+        # The QShortcuts below own key dispatch and support user customization;
+        # menu actions do not duplicate their keyboard accelerators.
+        editmenu.addAction('Clear Selected Pixels   (Delete / Backspace)', self.clear_selected_pixels)
+        editmenu.addAction('Clear Active Cel / Layer', self.clear_active_cel)
+        editmenu.addSeparator()
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
         self._build_animation_menu()
         viewmenu = self.menuBar().addMenu('&View')
@@ -3348,6 +3419,8 @@ class MainWindow(QMainWindow):
             ('Hand / Pan Tool', 'H', lambda: self._tool_shortcut('pan')),
             ('Select All', 'Ctrl+A', self.canvas.select_all),
             ('Deselect', 'Ctrl+D', self.canvas.deselect),
+            ('Clear Selected Pixels', 'Delete', self.clear_selected_pixels),
+            ('Clear Selected Pixels Alternative', 'Backspace', self.backspace_clear_selected_pixels),
             ('Previous Frame', ',', lambda: self.navigate_frame(-1)),
             ('Next Frame', '.', lambda: self.navigate_frame(1)),
             ('First Frame', '<', lambda: self.go_to_end_frame(first=True)),
@@ -4198,11 +4271,44 @@ class MainWindow(QMainWindow):
             self.refresh_frames()
             self.status.setText(f'Updated {len(frames)} selected frames (undo available).')
 
+    def _clear_shortcut_allowed(self):
+        # Global Delete and Backspace must not intercept normal editing in a
+        # filename field, color value input, a dialog, or another text widget.
+        widget = QApplication.focusWidget()
+        while widget is not None:
+            if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit,
+                                   QAbstractSpinBox, QComboBox)):
+                return False
+            widget = widget.parentWidget()
+        return True
+
+    def clear_selected_pixels(self):
+        if self.project_active and self._clear_shortcut_allowed():
+            self.canvas.clear_selected_pixels()
+
+    def backspace_clear_selected_pixels(self):
+        # Backspace edits an in-progress polygonal lasso instead of erasing art.
+        if (self.canvas.tool == 'select' and self.canvas.selection_mode == 'polygonal'
+                and self.canvas.lasso_points):
+            self.canvas.lasso_points.pop()
+            self.canvas._update_lasso_preview()
+            return
+        self.clear_selected_pixels()
+
+    def clear_active_cel(self):
+        if self.project_active and self._clear_shortcut_allowed():
+            self.canvas.clear_active_cel()
+
     def _install_shortcuts(self):
         for name, default, callback in self._shortcut_defs:
             sequence = str(self.preferences.value('shortcuts/' + name, default))
-            shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            # Delete/Backspace should only be active while the canvas has
+            # keyboard focus. Window-wide shortcuts eat keys in text inputs.
+            is_clear_key = name in ('Clear Selected Pixels', 'Clear Selected Pixels Alternative')
+            parent = self.canvas if is_clear_key else self
+            shortcut = QShortcut(QKeySequence(sequence), parent)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut if is_clear_key
+                                else Qt.ShortcutContext.WindowShortcut)
             shortcut.activated.connect(callback)
             self._shortcut_objects[name] = shortcut
 
