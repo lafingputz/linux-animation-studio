@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.33.1: selected-pixel clearing and active-cel clearing."""
+"""Linux Animation Studio v0.34.0: selection-aware raster flood fill."""
 import io
 import wave
 import time
@@ -28,8 +28,9 @@ from PySide6.QtWidgets import (
 )
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
+from fill_support import flood_region
 
-APP_VERSION = "0.33.1"
+APP_VERSION = "0.34.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -208,7 +209,9 @@ class Canvas(QWidget):
         self.eraser = False
         self.eraser_size = 48
         self.zoom = 1.0
-        self.tool = 'brush'  # brush, eraser, select, move
+        self.tool = 'brush'  # brush, eraser, fill, select, transform, pan
+        self.fill_tolerance = 24
+        self.fill_contiguous = True
         self.selection = None  # Bounding QRect in document pixels
         self.selection_path = None  # Actual selected geometry, with antialiased edges
         self.selection_mask = None  # ARGB mask shared by raster operations
@@ -1437,6 +1440,91 @@ class Canvas(QWidget):
         """Backwards-compatible explicit clear action for the active cel."""
         return self.clear_active_cel()
 
+    def flood_fill(self, position):
+        """Fill connected pixels on the active raster cel, respecting selections.
+
+        The image used to determine the region is the active layer, rather than
+        the flattened visible composite. Linked cels and static layers share
+        the result through the same undoable cel replacement as Clear Layer.
+        """
+        if (self.playing or self.drawing or self.transform_session is not None
+                or self.drag_origin is not None):
+            return False
+        layer = self.active_layer()
+        if layer is None or not layer.visible:
+            self.diagnostic.emit('Select a visible raster layer before filling.')
+            return False
+        x, y = int(position.x()), int(position.y())
+        if not (0 <= x < self.width_px and 0 <= y < self.height_px):
+            return False
+        width, height = self.width_px, self.height_px
+        indices = [self.frame_index]
+        if (getattr(self, 'multi_edit_enabled', False)
+                and len(getattr(self, 'multi_edit_frames', [])) > 1
+                and layer.mode != 'static'):
+            indices = sorted(set(indices + [i for i in self.multi_edit_frames
+                                            if 0 <= i < len(self.frames)]))
+        selection = None
+        if self.selection_mask is not None:
+            selection_pixels = self.selection_mask.constBits().cast('I')
+            selection = bytearray(1 if (pixel >> 24) else 0 for pixel in selection_pixels)
+            if not selection[y * width + x]:
+                return False
+        changes = []
+        seen = set()
+        for index in indices:
+            target = next((item for item in self.frames[index] if item.id == layer.id), None)
+            if target is None or not target.visible:
+                continue
+            key = (target.id, 'static' if target.mode == 'static' else target.cel_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            before = target.image.copy()
+            # Straight-ARGB conversion avoids comparing premultiplied RGB values
+            # (and properly identifies transparent background regardless of RGB).
+            straight = before.convertToFormat(QImage.Format.Format_ARGB32)
+            region = flood_region(straight.constBits().cast('I'), width, height,
+                                  x, y, self.fill_tolerance, self.fill_contiguous,
+                                  selection)
+            if not any(region):
+                continue
+            # Build a transparent overlay with only the pixels in the chosen
+            # region. One Qt composition call applies the color, using the
+            # antialiased selection path as a clip when present.
+            overlay = transparent_image(width, height)
+            pixels = overlay.bits().cast('I')
+            argb = self.color.rgba()
+            premul = QColor.fromRgba(argb).rgba()
+            if (argb >> 24) != 255:
+                a = argb >> 24
+                premul = ((a << 24) |
+                          (((argb >> 16 & 255) * a + 127) // 255 << 16) |
+                          (((argb >> 8 & 255) * a + 127) // 255 << 8) |
+                          (((argb & 255) * a + 127) // 255))
+            for i, chosen in enumerate(region):
+                if chosen:
+                    pixels[i] = premul
+            del pixels
+            after = before.copy()
+            painter = QPainter(after)
+            if self.selection_path is not None:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setClipPath(self.selection_path)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.drawImage(0, 0, overlay)
+            painter.end()
+            if before != after:
+                changes.append(dict(id=target.id, cel_id=target.cel_id,
+                                    mode=target.mode, before=before, after=after))
+        if not changes:
+            return False
+        command = dict(type='cel_clear', changes=changes)
+        self._apply(command, True)
+        self._push(command)
+        self.diagnostic.emit(f'Filled {len(changes)} cel(s); tolerance {self.fill_tolerance}.')
+        return True
+
     def tabletEvent(self, event):
         typ = event.type()
         pressure = float(event.pressure())
@@ -1449,7 +1537,9 @@ class Canvas(QWidget):
             return
         if typ == QEvent.Type.TabletPress:
             self.ignore_mouse = True
-            if self.tool in ("brush", "eraser"):
+            if self.tool == 'fill':
+                self.flood_fill(event.position() / self.zoom)
+            elif self.tool in ("brush", "eraser"):
                 self._begin_stroke('tablet')
                 self.stroke(event.position() / self.zoom, pressure, True)
             else:
@@ -1484,7 +1574,9 @@ class Canvas(QWidget):
             return
         self.show_hover(event.position() / self.zoom, 1.0)
         if not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton:
-            if self.tool in ('brush', 'eraser'):
+            if self.tool == 'fill':
+                self.flood_fill(event.position() / self.zoom)
+            elif self.tool in ('brush', 'eraser'):
                 self._begin_stroke('mouse')
                 self.stroke(event.position() / self.zoom, 1.0, False)
             else:
@@ -2921,6 +3013,7 @@ class MainWindow(QMainWindow):
         for tool, label, hint in [
             ('brush', '🖌', 'Brush: click to draw, arrow for brush presets'),
             ('eraser', '⌫', 'Eraser: click to erase, arrow for size presets'),
+            ('fill', '▣', 'Paint Bucket: click to fill an enclosed area (G)'),
             ('select', '▱', 'Selection: arrow for rectangle / lassos'),
             ('transform', '➤', 'Transform / move selection or active cel'),
             ('pan', '✋', 'Pan canvas')]:
@@ -3043,6 +3136,19 @@ class MainWindow(QMainWindow):
         self.brush_opacity.valueChanged.connect(self.change_brush_opacity)
         self.brush_opacity.editingFinished.connect(self.return_canvas_focus)
         left.addWidget(self.brush_opacity)
+        left.addWidget(QLabel('Paint Bucket / Flood Fill'))
+        self.fill_tolerance_input = QSpinBox()
+        self.fill_tolerance_input.setRange(0, 255)
+        self.fill_tolerance_input.setValue(self.canvas.fill_tolerance)
+        self.fill_tolerance_input.setToolTip('Maximum difference in each RGBA channel (0 = exact match).')
+        self.fill_tolerance_input.valueChanged.connect(lambda value: setattr(self.canvas, 'fill_tolerance', value))
+        self.fill_tolerance_input.editingFinished.connect(self.return_canvas_focus)
+        left.addWidget(QLabel('Fill tolerance'))
+        left.addWidget(self.fill_tolerance_input)
+        self.fill_contiguous_check = QCheckBox('Contiguous (connected area only)')
+        self.fill_contiguous_check.setChecked(True)
+        self.fill_contiguous_check.toggled.connect(lambda checked: setattr(self.canvas, 'fill_contiguous', checked))
+        left.addWidget(self.fill_contiguous_check)
         left.addStretch()
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
@@ -3386,6 +3492,7 @@ class MainWindow(QMainWindow):
         # menu actions do not duplicate their keyboard accelerators.
         editmenu.addAction('Clear Selected Pixels   (Delete / Backspace)', self.clear_selected_pixels)
         editmenu.addAction('Clear Active Cel / Layer', self.clear_active_cel)
+        editmenu.addAction('Paint Bucket / Flood Fill   (G)', lambda: self._tool_shortcut('fill'))
         editmenu.addSeparator()
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
         self._build_animation_menu()
@@ -3412,6 +3519,7 @@ class MainWindow(QMainWindow):
             ('Brush Tool', 'B', lambda: self._tool_shortcut('brush')),
             ('Cycle Brush Presets', 'Shift+B', self._cycle_brush_preset),
             ('Eraser Tool', 'E', lambda: self._tool_shortcut('eraser')),
+            ('Paint Bucket Tool', 'G', lambda: self._tool_shortcut('fill')),
             ('Rectangle Marquee', 'M', lambda: self._tool_shortcut('select', 'rectangle')),
             ('Freehand Lasso', 'L', lambda: self._tool_shortcut('select', 'freehand')),
             ('Cycle Lasso Tools', 'Shift+L', self._cycle_lasso),
@@ -4771,7 +4879,6 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.canvas.color = dialog.current_color()
             self.update_color_swatch()
-            self.set_tool('brush')
 
     def _set_project_active(self, active):
         self._exit_focus_mode()

@@ -1,8 +1,29 @@
-# Linux Animation Studio v0.33.1
+# Linux Animation Studio v0.34.0
 
-**Beta Feedback & GitHub Issue Reporting** (test candidate). Based on validated v0.32.0. LAS `.las` format **remains v6**; no modifications were made to rendering, brushes, timeline behavior, audio, or project serialization.
+**Paint Bucket / Flood Fill** (test candidate). Based on validated v0.33.1. LAS `.las` format **remains v6**. The existing drawing, animation, audio, packaging and feedback features are retained.
 
-## New in v0.33.1: Selection Clearing & Clear Layer
+## New in v0.34.0: Paint Bucket / Flood Fill
+
+- **Paint Bucket (G):** click inside an enclosed region on the active raster layer to fill it using the current Color Studio color.
+- **Tolerance (0–255):** controls acceptable difference per straight RGBA channel; defaults to 24.
+- **Contiguous toggle:** fill only connected pixels, or all matching pixels in the current cel.
+- **Selection-aware:** rectangle and lasso selection masks limit region traversal, with antialiased selection edges respected when applying color.
+- **Undo/redo:** each fill is one history action, including linked exposures, static layers and explicitly enabled multi-frame editing.
+- **Timeline previews:** cache invalidation and thumbnail refresh follow existing cel replacement history.
+- **No project format change:** `.las` stays at version 6.
+
+**Scope:** this version samples the active layer only. "Reference All Visible Layers," edge expansion and advanced fill antialiasing are deferred for later improvements. Pick a visible raster layer with a closed outline, select Paint Bucket (G), choose a color, and click inside.
+
+### Quick verification for v0.34.0
+
+1. Draw a closed outline on a raster layer, choose Paint Bucket (G), select a color, and click inside. Inside changes; outside does not.
+2. Change tolerance and confirm higher tolerance accepts nearby colors. Toggle Contiguous and compare connected versus global matching pixels.
+3. Test rectangle, freehand-lasso and polygonal-lasso selections; no filling may escape selection edges.
+4. Check Undo, Redo, independent cels, linked cels, static layers and multi-frame edit on/off.
+5. Verify timeline thumbnails refresh after a fill, and `.las` save/reopen retains the result.
+6. Regression-test brush/eraser input, Color Studio, animation, audio, export and three platform installers.
+
+## Previous: v0.33.1 Selection Clearing & Clear Layer
 
 - **Delete** or **Backspace** clears only the selected pixels of the active raster cel. If nothing is selected, neither key erases artwork.
 - **Edit → Clear Selected Pixels** provides a menu alternative.
@@ -13,7 +34,7 @@
 - Both deletion shortcuts can be customized under **Edit → Keyboard Shortcuts**. Text inputs are protected from those shortcuts.
 - The GitHub reporting destination remains `lafingputz/linux-animation-studio`. Project format is still `.las` v6.
 
-### Quick verification for v0.33.1
+### Previous-version selection clearing checks
 
 1. Draw on the active cel, Ctrl+A, press Delete, Undo and Redo; repeat with Backspace.
 2. Select a small rectangle or freehand lasso and delete only that area's pixels.
@@ -104,9 +125,9 @@ python tools/package_release.py --dry-run
 python tools/package_release.py
 ```
 
-- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.33.1-windows-setup.exe`.
-- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.33.1-macos.dmg`. Signing/notarization is not included.
-- Linux produces `releases/LinuxAnimationStudio-0.33.1-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
+- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.34.0-windows-setup.exe`.
+- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.34.0-macos.dmg`. Signing/notarization is not included.
+- Linux produces `releases/LinuxAnimationStudio-0.34.0-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
 - FFmpeg may still require the system installation or `LAS_FFMPEG_PATH`; installing LAS does not automatically install FFmpeg.
 
 ## Previous v0.33 feedback regression tests
