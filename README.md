@@ -1,27 +1,50 @@
-# Linux Animation Studio v0.32.0
+# Linux Animation Studio v0.33.0
 
-**Timeline Performance & Reliability** (testing candidate). Built on the validated v0.31.0 source with the `.las` project format **unchanged at version 6**.
+**Beta Feedback & GitHub Issue Reporting** (test candidate). Based on validated v0.32.0. LAS `.las` format **remains v6**; no modifications were made to rendering, brushes, timeline behavior, audio, or project serialization.
 
-## What's new in v0.32
+## New in v0.33
 
-- **Bounded timeline thumbnail cache:** Refreshing the timeline reuses 90×60 thumbnails for unchanged cels instead of compositing every full-size frame each time. Up to 128 thumbnails are retained (the maximum project timeline remains 120 frames), so a complete 120-frame refresh can benefit from the cache.
-- **Automatic visual invalidation:** Raster image changes are detected using Qt `QImage.cacheKey()`; layer visibility/opacity and motion transforms are included in the cache signature. A live motion-transform preview bypasses the cache, and opening or creating a project clears old thumbnails. Linked cel edits and undo/redo should refresh correctly.
-- **Performance diagnostics:** `python tools/benchmark_timeline.py` measures cold and warm 120-frame thumbnail passes and a single-frame edit at 1200×800. `tools/benchmark.py` remains unchanged for canvas compositing. Tests cover thumbnail caching and invalidation.
-- **Scope:** This release avoids changes to painting, audio synchronization, playback timing, project serialization, or installer architecture. These systems remain subject to regression testing. There is **no claimed measured speedup** until benchmarked on your machines.
+- GitHub **Bug report** and **Feature request** issue forms in `.github/ISSUE_TEMPLATE/`. Bug reports request the LAS version, operating system, steps to reproduce, expected/actual behavior, and optional screenshots/diagnostics. Feature requests ask which workflow needs improving and what the proposed solution should do.
+- New **Help → Report a Bug…** and **Help → Request a Feature…** menu actions open the appropriate GitHub issue form in the user's default browser. No automatic issue creation or data uploads.
+- New **Help → Copy System Information…** dialog displays LAS version, OS, architecture, Python, Qt, PySide6, and source/packaged status. Information is placed on the clipboard **only** when the user clicks the Copy button. No username, home directory, path to projects, IP address, artwork, or error logs are collected.
+- New **Help → Configure Feedback Repository…** lets a tester or developer change the issue-tracker destination locally. The configured destination is stored in application preferences, not inside `.las` files. Feedback links accept canonical GitHub `owner/repo` identifiers only.
+- The Windows test-suite UTF-8 decoding issue in `tests/test_distribution31.py` is corrected.
+- Existing v0.32 thumbnail caching, dockable workspaces, Color Studio, frame tools, installers, and compatibility tests are preserved.
 
-## Existing features preserved
+## Important: Set your REAL GitHub repository before distributing a beta
 
+The source package deliberately **does not invent your repository URL**. Before building and sharing installers, open **`assets/feedback.json`** and set the repository identifier:
 
+```json
+{
+  "repository": "YOUR_GITHUB_ACCOUNT/YOUR_REPOSITORY"
+}
+```
 
-- **Recent Projects:** Welcome screen retains New/Open and displays up to 12 recently opened or saved `.las` files. Double-click a recent project, or select it and choose **Open Selected**. Missing files are flagged; you can remove an entry without deleting the actual document, or clear the whole list after confirmation. The list lives in your device-local `QSettings` preferences, not in `.las` project files.
-- **App identity:** A consistent LAS app icon is included in the source and passed to PyInstaller for native application shortcuts, window icons and packaged builds; the program still identifies its version in About and the title bar.
-- **Installer packaging:** New `tools/package_release.py` builds a Windows Inno Setup 6 installer (`.exe`), a macOS drag-to-Applications `.dmg` with `hdiutil`, or a portable Linux `.tar.gz` with optional per-user desktop installer/uninstaller scripts. Packaging must be run *on the target OS* after `tools/build.py`, using local native tools. None of the release packages are signed/notarized.
-- **Diagnostics:** Existing `tools/doctor.py`, packaging verification, automated `.las` regression tests and performance benchmarking are preserved. The new distribution checks cover installer plans and asset presence.
-- **Compatibility:** Existing Wayland panel grips, resizable/floating docks, independent workspaces, Color Studio, Wacom drawing, frame/audio tools, import and export logic are unchanged.
+For example, use the `owner/repo` portion of your own GitHub repository's URL. Replace *both* placeholder words. The default is an empty string, meaning no public destination is preconfigured. **Do not distribute the app with an empty value if you expect one-click bug reporting.**
 
-## Project source setup
+The `tools/build.py` PyInstaller helper already includes the full `assets/` folder in each native application build. **Rebuild the application and its installer after editing the JSON file.** If you change the JSON only in the source repository, already-built installations will not update their bundled copy. If an individual machine has a repository set in **Help → Configure Feedback Repository…**, that saved local override takes precedence.
 
-Extract **all** ZIP files and directories to your GitHub project, preserving `assets/`, `tests/` and `tools/`.
+If the maintainer doesn't set a repository, LAS prompts users to configure a destination rather than opening a guessed site. The GitHub issue URLs are:
+
+- `https://github.com/OWNER/REPO/issues/new?template=01_bug_report.yml`
+- `https://github.com/OWNER/REPO/issues/new?template=02_feature_request.yml`
+
+### GitHub setup
+
+1. Commit **the entire `.github/ISSUE_TEMPLATE/` directory**, including both `.yml` forms and `config.yml`, to your repository's **default branch**. Some GitHub upload interfaces hide dot-folders, so check carefully.
+2. In GitHub repository **Settings → General → Features**, ensure **Issues** is enabled. For ordinary outside beta testers to create issues, the repository must permit their issue submissions; a public repository is the straightforward choice.
+3. Visit the repository's **Issues → New issue** page and confirm both forms appear. Submit one test issue for each category, or preview and discard before submitting.
+4. Edit `assets/feedback.json` with the actual `owner/repo`, build and package native apps, then click Help → Report a Bug / Request a Feature from an **installed** build.
+5. Test with a non-maintainer GitHub account to ensure contributors have permission to open issues. GitHub requires testers to sign in to submit issues. For friends who don't want GitHub accounts, consider a separate optional web form later.
+
+The issue forms do not automatically create GitHub labels, and do not require repository credentials/API tokens. These links open the default browser; GitHub handles authentication and submission.
+
+**Privacy:** GitHub issues are visible to users who can access the repository and may be public. Instruct testers not to upload secrets, private artwork, sensitive file paths, or personal details. The diagnostics dialog is opt-in and nothing is automatically transmitted.
+
+## Source setup and launch (existing GitHub workflow)
+
+Upload all project files including hidden `.github/`, `assets/`, `tools/`, `tests/`, `feedback_support.py`, `main.py`, `requirements*.txt`, and `.gitignore` to your repository. Preserve directory structure.
 
 ### Linux / Surface Pro 3
 
@@ -48,15 +71,13 @@ git pull --ff-only
 ./.venv/bin/python main.py
 ```
 
-Change example paths to match your repository.
+Change the example paths to match your checkout. `requirements.txt` is unchanged.
 
-## Build and package
+## Run tests, build and package
 
-Use your virtual environment's Python, substituting `./.venv/bin/python` on macOS or `.\.venv\Scripts\python.exe` on Windows:
+Run in your project's virtual environment. Substitute `./.venv/bin/python` on macOS and `.\.venv\Scripts\python.exe` on Windows where needed.
 
 ```bash
-python -m pip install -r requirements-build.txt
-python tools/doctor.py
 python -m unittest discover -s tests -v
 python tools/build.py --dry-run
 python tools/build.py
@@ -65,27 +86,23 @@ python tools/package_release.py --dry-run
 python tools/package_release.py
 ```
 
-**Windows:** Requires **Inno Setup 6**, specifically `ISCC.exe` on PATH or in its normal Program Files location. Output: `releases/LinuxAnimationStudio-0.32.0-windows-setup.exe`. The installer includes Start Menu and optional desktop shortcuts and supports uninstall. It does not sign the executable or automatically bundle FFmpeg.
+- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.33.0-windows-setup.exe`.
+- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.33.0-macos.dmg`. Signing/notarization is not included.
+- Linux produces `releases/LinuxAnimationStudio-0.33.0-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
+- FFmpeg may still require the system installation or `LAS_FFMPEG_PATH`; installing LAS does not automatically install FFmpeg.
 
-**macOS:** Uses built-in `hdiutil` and outputs `releases/LinuxAnimationStudio-0.32.0-macos.dmg`. Open the disk image and drag the `.app` into `/Applications`. Unsigned applications may be blocked by Gatekeeper; test carefully in a local account. Apple developer signing/notarization is **not provided**.
+## Acceptance tests for v0.33
 
-**Linux:** Outputs `releases/LinuxAnimationStudio-0.32.0-linux.tar.gz` containing the native folder build, `run.sh`, `install.sh`, `uninstall.sh` and icon. Extract and run `./run.sh` to launch without installation, or `./install.sh` to install in the current user's `~/.local/share/` and create an applications-menu launcher. `./uninstall.sh` removes the local app/launcher and leaves preference and project data intact. This is an installable archive, **not an AppImage or system `.deb`**.
-
-**FFmpeg:** System FFmpeg or `LAS_FFMPEG_PATH` may be required for MP4 exports. `tools/build.py --ffmpeg /path/to/ffmpeg` can bundle a supplied executable; check redistribution/license conditions before publishing. Test FFmpeg independently on each build.
-
-**Clean-machine verification:** Copy packages to a separate clean user account or OS machine without your Python virtual environment; confirm launching, saving/opening `.las`, audio, exports, uninstall and absence of missing dynamic libraries. Packaging checks only verify structure, not that these workflows succeed.
-
-## Acceptance test suggestions
-
-1. Fresh launch with no project; New/Open; recent projects empty on first use and populate after first save/open.
-2. Save two files, restart, reopen via recent list. Oldest-first? Confirm most recent appears at top and no duplicates on repeated openings.
-3. Rename/move a project externally; verify missing-file status and removal don't delete any files.
-4. Open a malformed or unsupported `.las`; expect a useful error, no silently lost existing artwork.
-5. Test your previous dock layout and animation tools, shortcuts, color palettes, waveform, MP4 audio and Wacom pressure.
-6. Run full unittest suite; report results. Build the native app and the installer/package on each OS.
-7. Install from the native package (not source directory), launch without Python env, test opening and editing projects, export MP4 using FFmpeg.
-8. Test uninstall on Windows/Linux and moving the macOS app into Applications. Verify project data and brushes are preserved.
+1. GitHub Issues: Both issue forms appear on GitHub under Issues → New issue after the templates are on the default branch.
+2. Form validation: Required reproduction/description fields work; optional diagnostic and screenshot fields remain optional.
+3. Configured reports: On Windows, Linux, and macOS, Help → Report a Bug and Help → Request a Feature open the correct repository/template in the default browser.
+4. Unconfigured reports: A blank `assets/feedback.json` prompts for configuration, rather than opening a broken/fabricated link.
+5. Diagnostics: Help → Copy System Information displays meaningful version and platform data; contents appear on clipboard only when clicked. No artwork or sensitive paths included.
+6. Settings persistence: A configured GitHub repository survives app restart; source and packaged installation behavior are correct.
+7. Unit tests: Run the full suite, including the new dependency-free feedback tests and the Windows UTF-8 test fix.
+8. Installer regression: Rebuild Windows setup, macOS DMG, and Linux tar.gz; check the configured issue URLs from installed apps.
+9. Application regression: Drawing, pressure where supported, Color Studio, layers, animation, timeline, audio, export, workspaces, project save/load, and thumbnail cache still work.
 
 ## Verification status
 
-Python static compilation and dependency-free test suites can run without PySide6. GUI tests and the native packaging processes must be executed on the corresponding OS and remain pending until user hardware testing. No signing/notarization or cross-platform distribution guarantees are implied.
+Source compiles and the non-GUI suite is run in this environment. PySide6 is not available here, so visual GUI and platform packaging verification must be completed on your actual devices. This is a **test candidate**, not a claimed validated release. The Surface Pro 3's heavy 24 FPS animation playback limitation remains outside this feedback-focused release.

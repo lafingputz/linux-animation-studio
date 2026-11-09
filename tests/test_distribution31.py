@@ -12,8 +12,8 @@ from package_release import package_plan, inno_script, APP, VERSION
 
 class DistributionTests(unittest.TestCase):
     def test_version_and_source(self):
-        main = (ROOT / 'main.py').read_text()
-        self.assertIn('APP_VERSION = "0.32.0"', main)
+        main = (ROOT / 'main.py').read_text(encoding='utf-8')
+        self.assertIn('APP_VERSION = "0.33.0"', main)
         self.assertIn('PROJECT_VERSION = 6', main)
         self.assertIn('self._refresh_recent_projects()', main)
         self.assertIn('self._remember_project(path)', main)
@@ -35,7 +35,7 @@ class DistributionTests(unittest.TestCase):
             self.assertIn('PrivilegesRequired=lowest',script)
             self.assertIn('[Icons]',script)
             self.assertIn('recursesubdirs',script)
-            self.assertIn('AppVersion=0.32.0',script)
+            self.assertIn('AppVersion=0.33.0',script)
 
     def test_icons_exist(self):
         for ext in ('png','ico','icns'):

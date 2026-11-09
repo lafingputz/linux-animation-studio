@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.32.0: timeline thumbnail caching and profiling."""
+"""Linux Animation Studio v0.33.0: beta feedback and diagnostics."""
 import io
 import wave
 import time
@@ -18,8 +18,8 @@ from bisect import bisect_left
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QLinearGradient
+from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QLinearGradient
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
@@ -27,7 +27,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
 )
 
-APP_VERSION = "0.32.0"
+from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
+
+APP_VERSION = "0.33.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -3321,6 +3323,12 @@ class MainWindow(QMainWindow):
         for name, dock in self._docks.items():
             viewmenu.addAction(dock.toggleViewAction())
         helpmenu = self.menuBar().addMenu('&Help')
+        helpmenu.addAction('Report a Bug…', lambda: self._open_feedback_form('bug'))
+        helpmenu.addAction('Request a Feature…', lambda: self._open_feedback_form('feature'))
+        helpmenu.addSeparator()
+        helpmenu.addAction('Copy System Information…', self.show_support_diagnostics)
+        helpmenu.addAction('Configure Feedback Repository…', self.configure_feedback_repository)
+        helpmenu.addSeparator()
         helpmenu.addAction('About Linux Animation Studio', self.show_about)
         self._set_project_active(False)
         self._refresh_tool_icons()
@@ -4247,6 +4255,78 @@ class MainWindow(QMainWindow):
             dialog.accept()
         buttons.accepted.connect(save)
         dialog.resize(450, 520)
+        dialog.exec()
+
+    def _feedback_repository(self):
+        """Local override first; otherwise the repository shipped by the maintainer."""
+        override = normalize_repository(self.preferences.value('feedback/repository', ''))
+        if override:
+            return override
+        asset_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+        return read_packaged_repository(asset_root)
+
+    def configure_feedback_repository(self):
+        current = self._feedback_repository()
+        repo, accepted = QInputDialog.getText(
+            self, 'Feedback repository',
+            'GitHub repository for bug reports and feature requests (owner/repo):',
+            QLineEdit.EchoMode.Normal, current)
+        if not accepted:
+            return False
+        repo = normalize_repository(repo)
+        if not repo:
+            QMessageBox.warning(self, 'Invalid GitHub repository',
+                                'Enter a valid GitHub owner/repository, for example your-account/your-repo.\n'
+                                'No changes were saved.')
+            return False
+        self.preferences.setValue('feedback/repository', repo)
+        self.status.setText('Feedback destination set to github.com/' + repo)
+        return True
+
+    def _open_feedback_form(self, category):
+        repo = self._feedback_repository()
+        if not repo:
+            answer = QMessageBox.question(
+                self, 'Feedback setup required',
+                'The maintainer has not configured a GitHub feedback repository for this LAS build.\n'
+                'Would you like to configure one now?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer != QMessageBox.StandardButton.Yes or not self.configure_feedback_repository():
+                return
+            repo = self._feedback_repository()
+        url = feedback_url(repo, category)
+        if not url:
+            QMessageBox.warning(self, 'Feedback URL unavailable', 'The feedback destination is not valid.')
+            return
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(self, 'Browser did not open',
+                                'Could not open the feedback form. Copy this address into your browser:\n' + url)
+        else:
+            self.status.setText('Opened GitHub feedback in your browser')
+
+    def show_support_diagnostics(self):
+        """Show a privacy-limited summary; copy only after explicit user action."""
+        from PySide6 import __version__ as pyside_version
+        diagnostics = support_diagnostics(
+            APP_VERSION, qVersion(), pyside_version, packaged=bool(getattr(sys, 'frozen', False)))
+        dialog = QDialog(self)
+        dialog.setWindowTitle('System Information for Bug Reports')
+        dialog.resize(510, 345)
+        layout = QVBoxLayout(dialog)
+        label = QLabel('Review this information before copying it into a public GitHub issue.\n'
+                       'LAS does not send it anywhere automatically.')
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        details = QPlainTextEdit()
+        details.setReadOnly(True)
+        details.setPlainText(diagnostics)
+        layout.addWidget(details)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        copy_button = buttons.addButton('Copy System Information', QDialogButtonBox.ButtonRole.ActionRole)
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(diagnostics))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
         dialog.exec()
 
     def show_about(self):
