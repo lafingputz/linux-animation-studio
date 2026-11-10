@@ -1,8 +1,8 @@
-# Linux Animation Studio v0.34.0
+# Linux Animation Studio v0.34.1
 
-**Paint Bucket / Flood Fill** (test candidate). Based on validated v0.33.1. LAS `.las` format **remains v6**. The existing drawing, animation, audio, packaging and feedback features are retained.
+**Paint Bucket Performance & Cursor Polish** (test candidate). Based on v0.34 core Paint Bucket and validated v0.33.1. LAS `.las` format **remains v6**. The existing drawing, animation, audio, packaging and feedback features are retained.
 
-## New in v0.34.0: Paint Bucket / Flood Fill
+## New in v0.34.1: Paint Bucket performance and visual polish
 
 - **Paint Bucket (G):** click inside an enclosed region on the active raster layer to fill it using the current Color Studio color.
 - **Tolerance (0–255):** controls acceptable difference per straight RGBA channel; defaults to 24.
@@ -14,14 +14,24 @@
 
 **Scope:** this version samples the active layer only. "Reference All Visible Layers," edge expansion and advanced fill antialiasing are deferred for later improvements. Pick a visible raster layer with a closed outline, select Paint Bucket (G), choose a color, and click inside.
 
-### Quick verification for v0.34.0
 
-1. Draw a closed outline on a raster layer, choose Paint Bucket (G), select a color, and click inside. Inside changes; outside does not.
+### Improvements in v0.34.1
+
+- **Proper bucket toolbar icon:** a dedicated vector-drawn bucket replaces the generic square.
+- **Visible custom bucket cursor:** a high-contrast bucket and precise hotspot remain visible on the canvas, even during a slow fill.
+- **Faster flood-fill search:** horizontal-span traversal and fewer repeated pixel comparisons. The fill semantics, selections, global/contiguous behavior, and undoable cel replacement are unchanged.
+- **Corrected multi-frame unit test:** explicitly returns the playhead to frame zero before checking opt-in editing.
+- **New baseline:** `python tools/benchmark_fill.py` checks a full transparent 1200×800 canvas using contiguous and global fills. Compare results on the same machine against v0.34 and test responsiveness interactively.
+- **Project compatibility:** `.las` format remains version 6; no changes to project storage.
+
+### Quick verification for v0.34.1
+
+1. Confirm the toolbar shows a real bucket icon, and the bucket cursor has a visible crosshair aligned with the click point. Draw a closed outline on a raster layer, choose Paint Bucket (G), select a color, and click inside. Inside changes; outside does not.
 2. Change tolerance and confirm higher tolerance accepts nearby colors. Toggle Contiguous and compare connected versus global matching pixels.
 3. Test rectangle, freehand-lasso and polygonal-lasso selections; no filling may escape selection edges.
 4. Check Undo, Redo, independent cels, linked cels, static layers and multi-frame edit on/off.
 5. Verify timeline thumbnails refresh after a fill, and `.las` save/reopen retains the result.
-6. Regression-test brush/eraser input, Color Studio, animation, audio, export and three platform installers.
+6. Run `python tools/benchmark_fill.py` on Linux, Windows, and macOS, especially the Surface Pro 3. Regression-test brush/eraser input, Color Studio, animation, audio, export and three platform installers.
 
 ## Previous: v0.33.1 Selection Clearing & Clear Layer
 
@@ -125,9 +135,9 @@ python tools/package_release.py --dry-run
 python tools/package_release.py
 ```
 
-- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.34.0-windows-setup.exe`.
-- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.34.0-macos.dmg`. Signing/notarization is not included.
-- Linux produces `releases/LinuxAnimationStudio-0.34.0-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
+- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.34.1-windows-setup.exe`.
+- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.34.1-macos.dmg`. Signing/notarization is not included.
+- Linux produces `releases/LinuxAnimationStudio-0.34.1-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
 - FFmpeg may still require the system installation or `LAS_FFMPEG_PATH`; installing LAS does not automatically install FFmpeg.
 
 ## Previous v0.33 feedback regression tests
@@ -145,3 +155,10 @@ python tools/package_release.py
 ## Verification status
 
 Source compiles and the non-GUI suite is run in this environment. PySide6 is not available here, so visual GUI and platform packaging verification must be completed on your actual devices. This is a **test candidate**, not a claimed validated release. The Surface Pro 3's heavy 24 FPS animation playback limitation remains outside this feedback-focused release.
+
+### v0.34.1 acceptance priorities
+
+- Verify the toolbar bucket icon is visible in light/dark themes, and the cursor remains legible against dark, light, and colored artwork on all three OSes. Verify its hotspot fills the pixel actually indicated.
+- Compare a full-canvas 1200×800 fill on the Surface Pro 3 against v0.34, including time until the UI responds. Run `tools/benchmark_fill.py`; that number excludes compositing and UI overhead.
+- Rerun multi-frame fill opt-in tests and complete cross-platform draw/animation, save/load, and packaging regressions.
+- Leave issue #2 open until the corrective release passes; reference/all-visible layer fills will be a future enhancement.

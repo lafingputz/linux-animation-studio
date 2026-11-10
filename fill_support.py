@@ -1,64 +1,79 @@
-"""Qt-independent, iterative flood fill for LAS raster cels.
+"""Efficient Qt-independent scanline flood fill for LAS raster cels.
 
-Pixels are 0xAARRGGBB integers. The output is a one-byte-per-pixel mask;
-no user artwork is modified by this module.
+Pixels are straight-ARGB 0xAARRGGBB integers. Return a binary region mask;
+source pixels and selection input are never mutated.
 """
-from collections import deque
 
 
 def flood_region(pixels, width, height, x, y, tolerance=0, contiguous=True, allowed=None):
-    """Return a byte mask of pixels matching the clicked color.
+    """Find pixels matching the seed within tolerance in all RGBA channels.
 
-    Tolerance is maximum absolute difference per straight RGBA channel (0..255).
-    Fully transparent pixels compare as transparent regardless of stored RGB.
-    If provided, allowed is a byte sequence of 0/1 values for selection bounds.
+    A fully transparent pixel matches any other fully transparent pixel,
+    independently of its otherwise invisible RGB components.
     """
     width, height = int(width), int(height)
-    if width <= 0 or height <= 0 or len(pixels) != width * height:
+    count = width * height
+    if width <= 0 or height <= 0 or len(pixels) != count:
         raise ValueError('Invalid image size or pixel buffer')
-    if allowed is not None and len(allowed) != width * height:
+    if allowed is not None and len(allowed) != count:
         raise ValueError('Invalid selection mask')
-    result = bytearray(width * height)
+    result = bytearray(count)
     if not (0 <= x < width and 0 <= y < height):
         return result
-    initial = y * width + x
-    if allowed is not None and not allowed[initial]:
+    start = y * width + x
+    if allowed is not None and not allowed[start]:
         return result
     tolerance = max(0, min(255, int(tolerance)))
-    seed = int(pixels[initial])
-    def components(value):
-        alpha = value >> 24 & 255
-        if alpha == 0:
-            return (0, 0, 0, 0)
-        return (value >> 16 & 255, value >> 8 & 255, value & 255, alpha)
-    target = components(seed)
-    def matching(index):
+    seed = int(pixels[start])
+    seed_a = (seed >> 24) & 255
+    seed_r = (seed >> 16) & 255 if seed_a else 0
+    seed_g = (seed >> 8) & 255 if seed_a else 0
+    seed_b = seed & 255 if seed_a else 0
+
+    # Avoid allocating 4-tuples and running all()/zip() for every visited pixel.
+    def matches(index):
         if allowed is not None and not allowed[index]:
             return False
-        candidate = components(int(pixels[index]))
-        return all(abs(a-b) <= tolerance for a,b in zip(candidate, target))
+        value = int(pixels[index])
+        alpha = (value >> 24) & 255
+        if alpha == 0:
+            return (abs(seed_a) <= tolerance and seed_r <= tolerance
+                    and seed_g <= tolerance and seed_b <= tolerance)
+        return (abs(alpha - seed_a) <= tolerance
+                and abs(((value >> 16) & 255) - seed_r) <= tolerance
+                and abs(((value >> 8) & 255) - seed_g) <= tolerance
+                and abs((value & 255) - seed_b) <= tolerance)
+
     if not contiguous:
-        for i in range(width * height):
-            if matching(i):
+        for i in range(count):
+            if matches(i):
                 result[i] = 1
         return result
-    pending = deque([initial])
-    # Scanline fill: mark each horizontal run once, enqueue vertical neighbors.
+
+    # Visit each matching horizontal run once. Only queue the beginning of
+    # a vertical neighbor's matching run, not every pixel above/below the run.
+    pending = [start]
     while pending:
-        pos = pending.pop()
-        if result[pos] or not matching(pos):
+        seed_index = pending.pop()
+        if result[seed_index] or not matches(seed_index):
             continue
-        row_start = pos // width * width
-        left, right = pos, pos
-        while left > row_start and not result[left - 1] and matching(left - 1):
-            left -= 1
+        row_start = seed_index // width * width
         row_end = row_start + width
-        while right + 1 < row_end and not result[right + 1] and matching(right + 1):
+        left = seed_index
+        while left > row_start and not result[left - 1] and matches(left - 1):
+            left -= 1
+        right = seed_index
+        while right + 1 < row_end and not result[right + 1] and matches(right + 1):
             right += 1
-        for i in range(left, right + 1):
-            result[i] = 1
-            if i >= width and not result[i-width] and matching(i-width):
-                pending.append(i-width)
-            if i + width < width*height and not result[i+width] and matching(i+width):
-                pending.append(i+width)
+        result[left:right + 1] = b'\x01' * (right - left + 1)
+
+        for neighbor_offset in (-width, width):
+            if not 0 <= left + neighbor_offset < count:
+                continue
+            in_run = False
+            for i in range(left + neighbor_offset, right + neighbor_offset + 1):
+                eligible = not result[i] and matches(i)
+                if eligible and not in_run:
+                    pending.append(i)
+                in_run = eligible
     return result

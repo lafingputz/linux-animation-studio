@@ -49,8 +49,8 @@ class FloodRegionTests(unittest.TestCase):
     def test_source_hooks(self):
         source=(ROOT/'main.py').read_text(encoding='utf-8')
         ast.parse(source)
-        self.assertIn('APP_VERSION = "0.34.0"',source)
-        for needle in ["('fill', '▣'", "('Paint Bucket Tool', 'G'",'def flood_fill(self, position):',"elif self.tool in ('brush', 'eraser')",'from fill_support import flood_region']:
+        self.assertIn('APP_VERSION = "0.34.1"',source)
+        for needle in ["('fill', '🪣'", "('Paint Bucket Tool', 'G'",'def flood_fill(self, position):',"elif self.tool in ('brush', 'eraser')",'from fill_support import flood_region', 'def bucket_cursor():', 'def draw_bucket_glyph(']:
             self.assertIn(needle,source)
 
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
@@ -112,13 +112,16 @@ class FloodQtTests(unittest.TestCase):
 
     def test_multiframe_opt_in(self):
         self.canvas.add_frame(True)
+        self.canvas.change_frame(0)
         self.canvas.multi_edit_frames=[0,1]
         self.canvas.multi_edit_enabled=False
         self.assertTrue(self.canvas.flood_fill(QPointF(4,4)))
+        self.assertEqual(self.canvas.frames[0][0].image.pixelColor(4,4).alpha(),255)
         self.assertEqual(self.canvas.frames[1][0].image.pixelColor(4,4).alpha(),0)
         self.canvas.undo()
         self.canvas.multi_edit_enabled=True
         self.assertTrue(self.canvas.flood_fill(QPointF(4,4)))
+        self.assertEqual(self.canvas.frames[0][0].image.pixelColor(4,4).alpha(),255)
         self.assertEqual(self.canvas.frames[1][0].image.pixelColor(4,4).alpha(),255)
 
 if __name__=='__main__': unittest.main()

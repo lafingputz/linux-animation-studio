@@ -1,4 +1,4 @@
-"""Selection clearing and linked-cel regression tests for v0.34.0."""
+"""Selection clearing and linked-cel regression tests for v0.34.1."""
 import os
 import unittest
 from pathlib import Path
@@ -19,7 +19,7 @@ class ClearSourceTests(unittest.TestCase):
     def test_hooks_and_version(self):
         source = (ROOT / 'main.py').read_text(encoding='utf-8')
         tree = ast.parse(source)
-        self.assertIn('APP_VERSION = "0.34.0"', source)
+        self.assertIn('APP_VERSION = "0.34.1"', source)
         self.assertIn('PROJECT_VERSION = 6', source)
         for phrase in ("('Clear Selected Pixels', 'Delete'",
                        "('Clear Selected Pixels Alternative', 'Backspace'",

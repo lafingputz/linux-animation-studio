@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = 'LinuxAnimationStudio'
-VERSION = '0.34.0'
+VERSION = '0.34.1'
 
 
 def package_plan(root=ROOT, platform=sys.platform):

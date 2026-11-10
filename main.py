@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.34.0: selection-aware raster flood fill."""
+"""Linux Animation Studio v0.34.1: faster flood fill and visible bucket pointer."""
 import io
 import wave
 import time
@@ -19,7 +19,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QLinearGradient
+from PySide6.QtGui import QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region
 
-APP_VERSION = "0.34.0"
+APP_VERSION = "0.34.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -42,6 +42,46 @@ def transparent_image(width=WIDTH, height=HEIGHT):
     img = QImage(width, height, IMAGE_FORMAT)
     img.fill(Qt.GlobalColor.transparent)
     return img
+
+
+def draw_bucket_glyph(painter, dark_outline=True):
+    """Draw a recognizable tilted paint bucket at 40px for toolbar and cursor."""
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    body = QPainterPath()
+    body.moveTo(13, 5)
+    body.lineTo(31, 17)
+    body.lineTo(20, 30)
+    body.lineTo(7, 18)
+    body.closeSubpath()
+    edge = QColor('#17202a') if dark_outline else QColor('#eaf0fa')
+    painter.setPen(QPen(edge, 2.3, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(QColor('#e7eff9') if dark_outline else QColor('#6e90ac'))
+    painter.drawPath(body)
+    painter.drawLine(QPointF(10, 10), QPointF(27, 23))
+    painter.setBrush(QColor('#4bb9f1'))
+    painter.drawEllipse(QRectF(22, 29, 5, 6))
+    painter.drawEllipse(QRectF(29, 27, 3.5, 4.5))
+
+
+def bucket_cursor():
+    """High-contrast bucket cursor with crosshair anchored at the click point."""
+    pix = QPixmap(44, 44)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.translate(5, 0)
+    draw_bucket_glyph(p)
+    # Exact click location is shown independently of the bucket illustration.
+    p.setBrush(QColor('#ffffff'))
+    p.setPen(QPen(QColor('#121820'), 1.6))
+    p.drawEllipse(QPointF(3, 35), 2.5, 2.5)
+    p.drawLine(QPointF(3, 30), QPointF(3, 33))
+    p.drawLine(QPointF(3, 37), QPointF(3, 40))
+    p.drawLine(QPointF(0, 35), QPointF(1.5, 35))
+    p.drawLine(QPointF(4.5, 35), QPointF(7, 35))
+    p.end()
+    return QCursor(pix, 8, 35)
 
 
 def png_bytes(image):
@@ -265,9 +305,16 @@ class Canvas(QWidget):
 
     def _enforce_cursor(self):
         # Transform uses the standard OS arrow; other tools draw canvas overlays.
-        shape = (Qt.CursorShape.ArrowCursor if self.tool == "transform"
-                 else Qt.CursorShape.BlankCursor)
-        self.setCursor(shape)
+        if self.tool == 'fill':
+            # Do not hide the pointer for bucket mode: a true OS cursor stays
+            # legible when Qt is busy performing a large fill.
+            if not hasattr(self, '_bucket_cursor'):
+                self._bucket_cursor = bucket_cursor()
+            self.setCursor(self._bucket_cursor)
+        else:
+            shape = (Qt.CursorShape.ArrowCursor if self.tool == "transform"
+                     else Qt.CursorShape.BlankCursor)
+            self.setCursor(shape)
 
     def enterEvent(self, event):
         self._enforce_cursor()
@@ -3013,7 +3060,7 @@ class MainWindow(QMainWindow):
         for tool, label, hint in [
             ('brush', '🖌', 'Brush: click to draw, arrow for brush presets'),
             ('eraser', '⌫', 'Eraser: click to erase, arrow for size presets'),
-            ('fill', '▣', 'Paint Bucket: click to fill an enclosed area (G)'),
+            ('fill', '🪣', 'Paint Bucket: click to fill an enclosed area (G)'),
             ('select', '▱', 'Selection: arrow for rectangle / lassos'),
             ('transform', '➤', 'Transform / move selection or active cel'),
             ('pan', '✋', 'Pan canvas')]:
@@ -4016,6 +4063,12 @@ class MainWindow(QMainWindow):
                     tint = QColor(white); tint.setAlpha(alpha)
                     painter.setBrush(tint); painter.setPen(Qt.PenStyle.NoPen)
                     painter.drawEllipse(QRectF(17-radius, 17-radius, radius*2, radius*2))
+        elif tool == 'fill':
+            painter.save()
+            painter.translate(0, 0)
+            painter.scale(0.85, 0.85)
+            draw_bucket_glyph(painter, dark_outline=False)
+            painter.restore()
         elif tool == 'eraser':
             radius = max(3, min(12, round(self.canvas.eraser_size / 20) + 3))
             painter.setBrush(QColor('#768799'))
@@ -4029,7 +4082,7 @@ class MainWindow(QMainWindow):
     def _refresh_tool_icons(self):
         if not hasattr(self, 'tool_buttons') or not hasattr(self, 'canvas'):
             return
-        for tool in ('brush', 'eraser', 'select'):
+        for tool in ('brush', 'eraser', 'fill', 'select'):
             button = self.tool_buttons.get(tool)
             if button is None: continue
             button.setText('')
@@ -4041,6 +4094,8 @@ class MainWindow(QMainWindow):
                 button.setToolTip(f'Brush: {name} (B; Shift+B cycles)')
             elif tool == 'eraser':
                 button.setToolTip(f'Eraser: {self.canvas.eraser_size} px (E)')
+            elif tool == 'fill':
+                button.setToolTip('Paint Bucket: fill with selected color (G)')
             else:
                 button.setToolTip(f'Selection: {self.selection_mode_picker.currentText()} (M / L / Shift+L)')
 
