@@ -49,7 +49,7 @@ class FloodRegionTests(unittest.TestCase):
     def test_source_hooks(self):
         source=(ROOT/'main.py').read_text(encoding='utf-8')
         ast.parse(source)
-        self.assertIn('APP_VERSION = "0.34.1"',source)
+        self.assertIn('APP_VERSION = "0.35.0"',source)
         for needle in ["('fill', '🪣'", "('Paint Bucket Tool', 'G'",'def flood_fill(self, position):',"elif self.tool in ('brush', 'eraser')",'from fill_support import flood_region', 'def bucket_cursor():', 'def draw_bucket_glyph(']:
             self.assertIn(needle,source)
 

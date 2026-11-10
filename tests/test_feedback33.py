@@ -53,7 +53,7 @@ class FeedbackTests(unittest.TestCase):
                         'Configure Feedback Repository…', 'QDesktopServices.openUrl(QUrl(url))',
                         'QApplication.clipboard().setText(diagnostics)']:
             self.assertIn(element, main)
-        self.assertIn('APP_VERSION = "0.34.1"', main)
+        self.assertIn('APP_VERSION = "0.35.0"', main)
         self.assertIn('PROJECT_VERSION = 6', main)
 
     def test_official_repository_is_packaged_by_default(self):

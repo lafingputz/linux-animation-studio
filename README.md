@@ -1,8 +1,32 @@
-# Linux Animation Studio v0.34.1
+# Linux Animation Studio v0.35.0
 
-**Paint Bucket Performance & Cursor Polish** (test candidate). Based on v0.34 core Paint Bucket and validated v0.33.1. LAS `.las` format **remains v6**. The existing drawing, animation, audio, packaging and feedback features are retained.
+**Layers & Workflow Overhaul** (test candidate). Built on validated v0.34.1. LAS `.las` format **remains v6**. Existing drawing, animation, audio, packaging, Paint Bucket and GitHub feedback tools are retained.
 
-## New in v0.34.1: Paint Bucket performance and visual polish
+## New in v0.35.0: Layers & Workflow Overhaul
+
+- **Clickable eye icons on every layer:** show/hide an individual layer without changing the selected painting layer; toggling visibility uses the existing undo/redo history.
+- **Compact Layers toolbar:** icon buttons for Add Layer, Move Up, Move Down and Delete. Rename and visibility commands now live in the layer's context menu or eye control instead of long button rows. Delete asks for confirmation.
+- **Layers right-click:** Rename, Show/Hide, Move Up, Move Down, Delete. The chosen layer becomes active when opening its menu. A reference-layer command is deferred until reference-aware filling is implemented in v0.36.
+- **Canvas right-click:** when Brush or Eraser is selected, opens presets/library access, common brush or eraser sizes, brush opacity presets, and advanced settings. Right-click must not paint or erase artwork.
+- **Timeline right-click:** frame commands (add blank, duplicate, add multiple, delete, extend holds, split, link from and unlink), plus direct multi-frame Link / Unlink / Break when several frames are selected. A click within an existing multiple selection should preserve the selected range.
+- **Multi-frame Edit:** a clearly labeled toggle appears next to the timeline's status indicator and stays synchronized with the Animation menu option; off remains the default.
+- **Project compatibility:** `.las` file format remains version 6; no new drawing engine or serialized layer attributes.
+- **Distribution:** `/releases/` is ignored by Git so the generated installers are published as GitHub Release assets, not as source changes.
+
+**Not in v0.35:** Reference All Visible Layers and designated reference-layer filling are planned for v0.36, alongside improvements to Paint Bucket edges. Heavy playback on the older Surface Pro 3 remains a separate optimization target.
+
+### v0.35 hands-on verification checklist
+
+1. On each platform, toggle the eye icon beside a **non-active** layer. Ensure its visibility changes while the active painting layer remains unchanged; test Undo and Redo.
+2. Add, reorder and delete layers using compact controls. Right-click another layer to rename it, move it, show/hide it, and delete with confirmation. Ensure layer ordering and selection remain correct across frames.
+3. Right-click the canvas with Brush selected: see presets/library, size, opacity and Advanced Settings. Choose options and verify they take effect. Repeat with Eraser. Right-click must not leave a mark.
+4. Select multiple frames using Shift/Ctrl, then right-click a selected frame. The selected range should remain intact. Test Link Selected, Unlink Selected and Break Selected; verify each operation undoes in one step and refuses to overwrite independent artwork unexpectedly.
+5. Use frame context actions for add, duplicate, delete, link and exposure holds. Test on the first/last frame and during playback. Verify no accidental edits happen when a menu is dismissed.
+6. Toggle Multi-frame Edit beside the status indicator; confirm it stays synchronized with the Animation menu and that edits affect only selected frames when on.
+7. Regression-test brush and eraser, bucket, Color Studio, selection clearing, animation, audio, export and `.las` save/reopen. Run `python -m unittest discover -s tests -v` and build each OS installer.
+
+
+## Previous: v0.34.1 Paint Bucket performance and visual polish
 
 - **Paint Bucket (G):** click inside an enclosed region on the active raster layer to fill it using the current Color Studio color.
 - **Tolerance (0–255):** controls acceptable difference per straight RGBA channel; defaults to 24.
@@ -135,9 +159,9 @@ python tools/package_release.py --dry-run
 python tools/package_release.py
 ```
 
-- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.34.1-windows-setup.exe`.
-- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.34.1-macos.dmg`. Signing/notarization is not included.
-- Linux produces `releases/LinuxAnimationStudio-0.34.1-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
+- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.35.0-windows-setup.exe`.
+- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.35.0-macos.dmg`. Signing/notarization is not included.
+- Linux produces `releases/LinuxAnimationStudio-0.35.0-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
 - FFmpeg may still require the system installation or `LAS_FFMPEG_PATH`; installing LAS does not automatically install FFmpeg.
 
 ## Previous v0.33 feedback regression tests

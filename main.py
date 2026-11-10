@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.34.1: faster flood fill and visible bucket pointer."""
+"""Linux Animation Studio v0.35.0: compact layer tools and context menus."""
 import io
 import wave
 import time
@@ -24,13 +24,13 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout, QStyle,
 )
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region
 
-APP_VERSION = "0.34.1"
+APP_VERSION = "0.35.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -217,6 +217,7 @@ def interpolated_transform(keys, frame):
 
 
 class Canvas(QWidget):
+    canvas_context_requested = Signal(QPoint)
     diagnostic = Signal(str)
     history_changed = Signal(bool, bool)
     document_changed = Signal()
@@ -1614,6 +1615,12 @@ class Canvas(QWidget):
             return
         super().mouseDoubleClickEvent(event)
 
+    def contextMenuEvent(self, event):
+        """Right click is not a paint stroke; delegate tool menus to MainWindow."""
+        if not self.playing and self.tool in ('brush', 'eraser'):
+            self.canvas_context_requested.emit(event.globalPos())
+        event.accept()
+
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         if self.playing:
@@ -2598,6 +2605,43 @@ class ExposureFrameList(QListWidget):
         super().leaveEvent(event)
 
 
+class LayerEyeList(QListWidget):
+    """Layers with a dedicated clickable eye area, independent of selection."""
+    visibility_requested = Signal(str)
+    EYE_WIDTH = 30
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            if item is not None:
+                bounds = self.visualItemRect(item)
+                if event.position().x() < bounds.left() + self.EYE_WIDTH:
+                    self.visibility_requested.emit(item.data(Qt.ItemDataRole.UserRole))
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+
+def layer_eye_icon(visible):
+    """Explicit eye glyph, independent of installed emoji/fonts."""
+    image = QPixmap(24, 24)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(QColor('#3aaf91') if visible else QColor('#818792'), 1.7))
+    outline = QPainterPath()
+    outline.moveTo(2, 12)
+    outline.cubicTo(7, 4, 17, 4, 22, 12)
+    outline.cubicTo(17, 20, 7, 20, 2, 12)
+    painter.drawPath(outline)
+    painter.setBrush(QColor('#3aaf91') if visible else Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QPointF(12, 12), 3, 3)
+    if not visible:
+        painter.drawLine(3, 21, 21, 3)
+    painter.end()
+    return QIcon(image)
+
+
 class HSVDisc(QWidget):
     """Compact hue ring plus square saturation/value plane (pure Qt paint)."""
     changed = Signal(QColor)
@@ -3033,6 +3077,7 @@ class MainWindow(QMainWindow):
         self.canvas.diagnostic.connect(self.status.setText)
         self.canvas.dirty_changed.connect(self.refresh_title)
         self.canvas.document_changed.connect(self.refresh_layers)
+        self.canvas.canvas_context_requested.connect(self._canvas_context_menu)
         self.canvas.frames_changed.connect(self.refresh_frames)
         self.canvas.playhead_changed.connect(self.refresh_playhead)
 
@@ -3217,18 +3262,30 @@ class MainWindow(QMainWindow):
 
         right = QVBoxLayout()
         right.addWidget(QLabel('Layers (top to bottom)'))
-        self.layers_list = QListWidget()
+        self.layers_list = LayerEyeList()
         self.layers_list.setMinimumWidth(185)
+        self.layers_list.setIconSize(__import__('PySide6.QtCore', fromlist=['QSize']).QSize(24, 24))
         self.layers_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.layers_list.currentItemChanged.connect(self.selection_changed)
+        self.layers_list.visibility_requested.connect(self._toggle_layer_visibility_by_id)
+        self.layers_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.layers_list.customContextMenuRequested.connect(self._layer_context_menu)
+        self.layers_list.setToolTip('Click an eye to show/hide a layer; right-click a layer for operations.')
         right.addWidget(self.layers_list, 1)
-        for label, fn in [('+ Layer', self.canvas.new_layer), ('Delete Layer', self.canvas.delete_layer),
-                          ('Rename', self.rename_layer), ('Hide / Show', self.canvas.toggle_visibility),
-                          ('Move Up', lambda: self.canvas.move_layer(1)),
-                          ('Move Down', lambda: self.canvas.move_layer(-1))]:
-            b = QPushButton(label)
-            b.clicked.connect(fn)
-            right.addWidget(b)
+        layer_buttons = QHBoxLayout()
+        for symbol, tooltip, callback in [
+            ('+', 'Add Layer', self.canvas.new_layer),
+            ('↑', 'Move Layer Up', lambda: self.canvas.move_layer(1)),
+            ('↓', 'Move Layer Down', lambda: self.canvas.move_layer(-1)),
+            ('🗑', 'Delete Layer', self._delete_layer_confirmed),
+        ]:
+            control = QToolButton()
+            control.setText(symbol)
+            control.setToolTip(tooltip)
+            control.setMinimumSize(30, 30)
+            control.clicked.connect(callback)
+            layer_buttons.addWidget(control)
+        right.addLayout(layer_buttons)
         right.addWidget(QLabel('Track behavior'))
         self.layer_mode = QComboBox()
         self.layer_mode.addItem('Animated (independent cels)', 'animated')
@@ -3344,6 +3401,13 @@ class MainWindow(QMainWindow):
         self.multi_edit_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.multi_edit_indicator.setStyleSheet('QLabel { color: #61646a; padding: 3px 10px; border: 1px solid #8a8d92; border-radius: 4px; }')
         frame_controls.addWidget(self.multi_edit_indicator)
+        self.multi_edit_quick_toggle = QToolButton()
+        self.multi_edit_quick_toggle.setText('Multi-frame Edit')
+        self.multi_edit_quick_toggle.setCheckable(True)
+        self.multi_edit_quick_toggle.setToolTip('Enable simultaneous editing of selected animation frames. Linked cels are edited once.')
+        self.multi_edit_quick_toggle.toggled.connect(self.multi_edit_checkbox.setChecked)
+        self.multi_edit_checkbox.toggled.connect(self.multi_edit_quick_toggle.setChecked)
+        frame_controls.addWidget(self.multi_edit_quick_toggle)
 
         self.track_visualization = QLabel('Cel tracks')
         self.track_visualization.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -3442,6 +3506,8 @@ class MainWindow(QMainWindow):
         self.frame_list.setSpacing(5)
         self.frame_list.currentRowChanged.connect(self._timeline_current_changed)
         self.frame_list.itemSelectionChanged.connect(self._timeline_selection_changed)
+        self.frame_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.frame_list.customContextMenuRequested.connect(self._timeline_context_menu)
         grip_hint = QLabel('Hold exposure: drag the turquoise grip at the right edge of a frame onto a later frame.')
         grip_hint.setStyleSheet('color: #328f98; font-size: 10px;')
         timeline.addWidget(grip_hint)
@@ -4393,16 +4459,19 @@ class MainWindow(QMainWindow):
         if ok:
             self._extend_source_through(source_index, end - 1)
 
-    def batch_frame_action(self):
+    def batch_frame_action(self, chosen_action=None):
         frames = list(self.timeline_selected_frames)
         if not frames:
             QMessageBox.information(self, 'Batch cels', 'Shift-click or Ctrl-click frame thumbnails to select a range.')
             return
         options = ['Link selected frames from current cel', 'Unlink selected frames', 'Break into independent cels']
-        action, ok = QInputDialog.getItem(self, 'Batch Cel Operation',
-            f'Operate on {len(frames)} selected frames:', options, 0, False)
-        if not ok:
-            return
+        if chosen_action in options:
+            action = chosen_action
+        else:
+            action, ok = QInputDialog.getItem(self, 'Batch Cel Operation',
+                f'Operate on {len(frames)} selected frames:', options, 0, False)
+            if not ok:
+                return
         layer = self.canvas.active_layer()
         if layer is None or layer.mode != 'animated' or self.canvas.playing:
             QMessageBox.warning(self, 'Batch cels', 'Select an animated layer and stop playback first.')
@@ -4700,7 +4769,7 @@ class MainWindow(QMainWindow):
         self.layers_list.blockSignals(True)
         self.layers_list.clear()
         for layer in reversed(self.canvas.layers):
-            item = QListWidgetItem(('● ' if layer.visible else '○ ') + layer.name)
+            item = QListWidgetItem(layer_eye_icon(layer.visible), layer.name)
             item.setData(Qt.ItemDataRole.UserRole, layer.id)
             self.layers_list.addItem(item)
             if layer.id == self.canvas.active_id:
@@ -4733,6 +4802,124 @@ class MainWindow(QMainWindow):
         if current is not None:
             self.canvas.select_layer(current.data(Qt.ItemDataRole.UserRole))
             self.refresh_layers()
+
+    def _toggle_layer_visibility_by_id(self, layer_id):
+        if not self.project_active or self.canvas.playing:
+            return
+        # Toggle the clicked layer even when another layer is selected.
+        old_id = self.canvas.active_id
+        if old_id != layer_id:
+            self.canvas.select_layer(layer_id)
+        self.canvas.toggle_visibility()
+        if old_id != layer_id and self.canvas.layer_by_id(old_id):
+            self.canvas.select_layer(old_id)
+
+    def _delete_layer_confirmed(self):
+        if not self.project_active or len(self.canvas.layers) <= 1:
+            return
+        layer = self.canvas.active_layer()
+        if layer is None:
+            return
+        response = QMessageBox.question(self, 'Delete Layer',
+            f'Delete layer "{layer.name}" across all frames? You can undo this operation.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if response == QMessageBox.StandardButton.Yes:
+            self.canvas.delete_layer()
+
+    def _layer_context_menu(self, pos):
+        if not self.project_active:
+            return
+        item = self.layers_list.itemAt(pos)
+        if item is None:
+            return
+        ident = item.data(Qt.ItemDataRole.UserRole)
+        if self.canvas.active_id != ident:
+            self.canvas.select_layer(ident)
+        layer = self.canvas.active_layer()
+        if layer is None:
+            return
+        menu = QMenu(self)
+        menu.addAction('Rename Layer…', self.rename_layer)
+        menu.addAction('Show Layer' if not layer.visible else 'Hide Layer', self.canvas.toggle_visibility)
+        menu.addSeparator()
+        up = menu.addAction('Move Up', lambda: self.canvas.move_layer(1))
+        down = menu.addAction('Move Down', lambda: self.canvas.move_layer(-1))
+        index = self.canvas.layers.index(layer)
+        up.setEnabled(index < len(self.canvas.layers) - 1)
+        down.setEnabled(index > 0)
+        menu.addSeparator()
+        delete = menu.addAction('Delete Layer…', self._delete_layer_confirmed)
+        delete.setEnabled(len(self.canvas.layers) > 1)
+        menu.exec(self.layers_list.viewport().mapToGlobal(pos))
+
+    def _canvas_context_menu(self, global_pos):
+        if not self.project_active:
+            return
+        tool = self.canvas.tool
+        if tool not in ('brush', 'eraser'):
+            return
+        menu = QMenu(self)
+        if tool == 'brush':
+            menu.addAction('Brush Library…', lambda: self._open_brush_library(False))
+            presets = menu.addMenu('Brush Preset')
+            for name in ('Round', 'Pencil', 'Ink', 'Airbrush'):
+                presets.addAction(name, lambda checked=False, n=name: self._quick_brush(n))
+        else:
+            menu.addAction('Eraser Library…', lambda: self._open_brush_library(True))
+        menu.addSeparator()
+        size = menu.addMenu('Size')
+        for pixels in (5, 10, 20, 40, 80, 160):
+            size.addAction(f'{pixels} px', lambda checked=False, n=pixels: self.size_input.setValue(n))
+        if tool == 'brush':
+            opacity = menu.addMenu('Opacity')
+            for percent in (25, 50, 75, 100):
+                opacity.addAction(f'{percent}%', lambda checked=False, n=percent: self.brush_opacity.setValue(n))
+        menu.addSeparator()
+        menu.addAction('Advanced Tool Settings…', lambda: self._docks['tools'].show())
+        menu.exec(global_pos)
+
+    def _timeline_context_menu(self, pos):
+        if not self.project_active:
+            return
+        item = self.frame_list.itemAt(pos)
+        if item is None:
+            return
+        index = self.frame_list.row(item)
+        # Preserve an existing multi-frame selection when clicking within it.
+        # Otherwise target the frame under the pointer.
+        prior_selection = [r for r in self.timeline_selected_frames
+                           if 0 <= r < self.frame_list.count()]
+        keep_selection = item.isSelected() and len(prior_selection) > 1
+        if self.canvas.frame_index != index:
+            self.canvas.change_frame(index)
+        self.frame_list.blockSignals(True)
+        self.frame_list.clearSelection()
+        for row in (prior_selection if keep_selection else [index]):
+            self.frame_list.item(row).setSelected(True)
+        self.frame_list.blockSignals(False)
+        self._timeline_selection_changed()
+        menu = QMenu(self)
+        menu.addAction('Add Blank Frame After', lambda: self.canvas.add_frame(False))
+        menu.addAction('Duplicate Frame', lambda: self.canvas.add_frame(True))
+        menu.addAction('Add Multiple Frames…', self.add_multiple_frames_dialog)
+        delete = menu.addAction('Delete Frame', self.canvas.delete_frame)
+        delete.setEnabled(len(self.canvas.frames) > 1)
+        menu.addSeparator()
+        menu.addAction('Extend Hold…', self.extend_hold_dialog)
+        menu.addAction('Extend Hold To Frame…', self.extend_hold_to_frame)
+        menu.addAction('Break / New Cel', self.split_hold)
+        menu.addAction('Link From…', self.link_from)
+        menu.addAction('Unlink Cel', self.unlink_current)
+        if len(self.timeline_selected_frames) > 1:
+            menu.addSeparator()
+            menu.addAction('Link Selected Frames From Current Cel',
+                           lambda: self.batch_frame_action('Link selected frames from current cel'))
+            menu.addAction('Unlink Selected Frames',
+                           lambda: self.batch_frame_action('Unlink selected frames'))
+            menu.addAction('Break Selected Frames Into Independent Cels',
+                           lambda: self.batch_frame_action('Break into independent cels'))
+        menu.exec(self.frame_list.viewport().mapToGlobal(pos))
 
     def rename_layer(self):
         layer = self.canvas.active_layer()
