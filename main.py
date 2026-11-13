@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.35.0: compact layer tools and context menus."""
+"""Linux Animation Studio v0.35.1: input and workflow stabilization."""
 import io
 import wave
 import time
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region
 
-APP_VERSION = "0.35.0"
+APP_VERSION = "0.35.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -1576,10 +1576,31 @@ class Canvas(QWidget):
     def tabletEvent(self, event):
         typ = event.type()
         pressure = float(event.pressure())
-        self.setFocus(Qt.FocusReason.MouseFocusReason) if typ == QEvent.Type.TabletPress else None
-        self.show_hover(event.position() / self.zoom, pressure if self.drawing else 1.0)
         device = event.pointingDevice()
         name = device.name() if device else 'Unknown tablet'
+        # A Wacom side button can produce tablet presses even while the nib is
+        # hovering. Only the primary nib/button is allowed to paint or fill.
+        # Qt may subsequently synthesize a mouse event for the same gesture.
+        buttons = event.buttons()
+        is_secondary = (event.button() == Qt.MouseButton.RightButton or
+                        bool(buttons & Qt.MouseButton.RightButton))
+        if is_secondary:
+            if typ == QEvent.Type.TabletPress:
+                self.ignore_mouse = True
+                if self.drawing and self.input_kind == 'tablet':
+                    self._end_stroke()
+                if not self.playing and self.tool in ('brush', 'eraser'):
+                    self.canvas_context_requested.emit(event.globalPosition().toPoint())
+            elif typ == QEvent.Type.TabletRelease:
+                self.ignore_mouse = False
+            event.accept()
+            return
+        # A hover/move with no primary button must never begin a stroke.
+        if typ == QEvent.Type.TabletPress and event.button() != Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        self.setFocus(Qt.FocusReason.MouseFocusReason) if typ == QEvent.Type.TabletPress else None
+        self.show_hover(event.position() / self.zoom, pressure if self.drawing else 1.0)
         if self.playing:
             event.accept()
             return
@@ -1593,9 +1614,9 @@ class Canvas(QWidget):
             else:
                 self._start_interaction(event.position() / self.zoom)
         elif typ == QEvent.Type.TabletMove:
-            if self.drawing and self.input_kind == 'tablet':
+            if self.drawing and self.input_kind == 'tablet' and buttons & Qt.MouseButton.LeftButton:
                 self.stroke(event.position() / self.zoom, pressure, True)
-            elif self.drag_origin is not None or self.transform_drag is not None:
+            elif (self.drag_origin is not None or self.transform_drag is not None) and buttons & Qt.MouseButton.LeftButton:
                 self._update_interaction(event.position() / self.zoom)
         elif typ == QEvent.Type.TabletRelease:
             if self.drawing and self.input_kind == 'tablet':
@@ -1627,7 +1648,8 @@ class Canvas(QWidget):
             event.accept()
             return
         self.show_hover(event.position() / self.zoom, 1.0)
-        if not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton:
+        if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
+                and not (event.buttons() & Qt.MouseButton.RightButton)):
             if self.tool == 'fill':
                 self.flood_fill(event.position() / self.zoom)
             elif self.tool in ('brush', 'eraser'):
@@ -1642,7 +1664,8 @@ class Canvas(QWidget):
         if not self.ignore_mouse:
             self.show_hover(event.position() / self.zoom, 1.0)
         if (not self.ignore_mouse and self.drawing and self.input_kind == 'mouse'
-                and event.buttons() & Qt.MouseButton.LeftButton):
+                and event.buttons() & Qt.MouseButton.LeftButton
+                and not event.buttons() & Qt.MouseButton.RightButton):
             self.stroke(event.position() / self.zoom, 1.0, False)
         elif (self.drag_origin is not None or self.transform_drag is not None) and event.buttons() & Qt.MouseButton.LeftButton:
             self._update_interaction(event.position() / self.zoom)
@@ -2606,20 +2629,49 @@ class ExposureFrameList(QListWidget):
 
 
 class LayerEyeList(QListWidget):
-    """Layers with a dedicated clickable eye area, independent of selection."""
+    """Layers with an eye hit target that never activates its row."""
     visibility_requested = Signal(str)
     EYE_WIDTH = 30
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._eye_pressed = False
+
+    def _on_eye(self, pos):
+        item = self.itemAt(pos.toPoint())
+        if item is None:
+            return None
+        bounds = self.visualItemRect(item)
+        return item if pos.x() < bounds.left() + self.EYE_WIDTH else None
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            item = self.itemAt(event.position().toPoint())
+            item = self._on_eye(event.position())
             if item is not None:
-                bounds = self.visualItemRect(item)
-                if event.position().x() < bounds.left() + self.EYE_WIDTH:
-                    self.visibility_requested.emit(item.data(Qt.ItemDataRole.UserRole))
-                    event.accept()
-                    return
+                self._eye_pressed = True
+                self.visibility_requested.emit(item.data(Qt.ItemDataRole.UserRole))
+                event.accept()
+                return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._eye_pressed:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._eye_pressed:
+            self._eye_pressed = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self._on_eye(event.position()) is not None:
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 def layer_eye_icon(visible):
@@ -4068,6 +4120,9 @@ class MainWindow(QMainWindow):
     def _quick_brush(self, preset):
         self.set_tool('brush')
         self.brush_select.setCurrentText(preset)
+        # setCurrentText does not emit when choosing the already-selected
+        # built-in entry while a custom brush remains active.
+        self.change_brush_preset(preset)
         self.return_canvas_focus()
 
     def _quick_eraser(self, size):
@@ -5053,7 +5108,12 @@ class MainWindow(QMainWindow):
             return
         self.canvas.brush_preset = name
         if self.canvas.active_custom_brush is not None:
+            self.custom_picker.blockSignals(True)
             self.custom_picker.setCurrentIndex(0)
+            self.custom_picker.blockSignals(False)
+            self.canvas.active_custom_brush = None
+            self.canvas._stamp_cache.clear()
+            self.update_custom_preview()
         settings = self.canvas.brush_settings[name]
         self.size_input.blockSignals(True)
         self.size_input.setValue(self.canvas.eraser_size if self.canvas.tool == 'eraser' else settings['size'])

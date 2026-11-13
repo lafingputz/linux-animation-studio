@@ -1,8 +1,24 @@
-# Linux Animation Studio v0.35.0
+# Linux Animation Studio v0.35.1
 
-**Layers & Workflow Overhaul** (test candidate). Built on validated v0.34.1. LAS `.las` format **remains v6**. Existing drawing, animation, audio, packaging, Paint Bucket and GitHub feedback tools are retained.
+**Input & Workflow Stabilization** (test candidate). Built on validated v0.34.1. LAS `.las` format **remains v6**. Existing drawing, animation, audio, packaging, Paint Bucket and GitHub feedback tools are retained.
 
-## New in v0.35.0: Layers & Workflow Overhaul
+## New in v0.35.1: Input & Workflow Stabilization
+
+- **Wacom/tablet side-button handling:** ignore non-primary tablet presses for painting; route right-button tablet presses to Brush/Eraser context menus. Guards against synthetic secondary-button mouse events. **Must be validated on Windows Cintiq, Linux Wacom, and macOS Apple Pencil.**
+- **Built-in brush re-selection:** selecting a built-in preset clears any custom-stamp selection even if the built-in combo box already shows the requested preset. Preset preview and cached stamp state update.
+- **Layer eye long-press:** consume the matching release and movement events so holding the eye does not select the layer row.
+- **Deletion warning:** the v0.35 source already says deletion *can* be undone. If a tester still sees the opposite message, confirm that the running build is 0.35.1 and report the exact menu/dialog wording.
+- **No format change:** `.las` v6 unchanged.
+
+### v0.35.1 focused retest
+
+1. **Windows / Cintiq:** using the pen's right-click side button, open Brush and Eraser menus both hovering and touching. Verify no dots or strokes are drawn. Verify ordinary pen-tip drawing, erasing, and pressure remain intact.
+2. **Linux / Wacom:** switch Custom → Round/Pencil/Ink/Airbrush using both the toolbar and canvas menus, including when the built-in combo already displays the target. Confirm the custom stamp no longer draws.
+3. **Windows / Cintiq:** hold a layer eye for 1–2 seconds and release. The visibility changes but the active layer does not. Repeat with a quick click, mouse and macOS Sidecar Apple Pencil.
+4. **All OS:** delete a populated layer, Undo, then Redo; confirm the warning wording and restored frames/cels. Confirm old `.las` projects still open correctly.
+5. Run all automated tests, full draw/animate/export regression, and installer smoke tests before marking issues #3/#4 complete.
+
+## Previous v0.35.0: Layers & Workflow Overhaul
 
 - **Clickable eye icons on every layer:** show/hide an individual layer without changing the selected painting layer; toggling visibility uses the existing undo/redo history.
 - **Compact Layers toolbar:** icon buttons for Add Layer, Move Up, Move Down and Delete. Rename and visibility commands now live in the layer's context menu or eye control instead of long button rows. Delete asks for confirmation.
@@ -159,9 +175,9 @@ python tools/package_release.py --dry-run
 python tools/package_release.py
 ```
 
-- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.35.0-windows-setup.exe`.
-- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.35.0-macos.dmg`. Signing/notarization is not included.
-- Linux produces `releases/LinuxAnimationStudio-0.35.0-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
+- Windows installer requires Inno Setup 6. Output: `releases/LinuxAnimationStudio-0.35.1-windows-setup.exe`.
+- macOS uses `hdiutil`: `releases/LinuxAnimationStudio-0.35.1-macos.dmg`. Signing/notarization is not included.
+- Linux produces `releases/LinuxAnimationStudio-0.35.1-linux.tar.gz`, a per-user installable archive with `install.sh` and `uninstall.sh`. It is not a `.deb` or AppImage.
 - FFmpeg may still require the system installation or `LAS_FFMPEG_PATH`; installing LAS does not automatically install FFmpeg.
 
 ## Previous v0.33 feedback regression tests
