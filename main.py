@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.35.1: input and workflow stabilization."""
+"""Linux Animation Studio v0.35.2: tablet context menu hotfix."""
 import io
 import wave
 import time
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region
 
-APP_VERSION = "0.35.1"
+APP_VERSION = "0.35.2"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -273,6 +273,8 @@ class Canvas(QWidget):
         self.input_kind = None
         self.last = None
         self.ignore_mouse = False
+        self._secondary_tablet_down = False
+        self._secondary_context_suppress_until = 0.0
         self.hover_position = None
         self.hover_pressure = 1.0
         self._before_stroke = None
@@ -1584,14 +1586,21 @@ class Canvas(QWidget):
         buttons = event.buttons()
         is_secondary = (event.button() == Qt.MouseButton.RightButton or
                         bool(buttons & Qt.MouseButton.RightButton))
-        if is_secondary:
+        if is_secondary or (self._secondary_tablet_down and typ == QEvent.Type.TabletRelease):
             if typ == QEvent.Type.TabletPress:
                 self.ignore_mouse = True
                 if self.drawing and self.input_kind == 'tablet':
                     self._end_stroke()
-                if not self.playing and self.tool in ('brush', 'eraser'):
-                    self.canvas_context_requested.emit(event.globalPosition().toPoint())
+                if not self._secondary_tablet_down and not self.playing and self.tool in ('brush', 'eraser'):
+                    self._secondary_tablet_down = True
+                    self._secondary_context_suppress_until = time.monotonic() + 0.4
+                    # Defer until the tablet event returns; avoid entering Qt's
+                    # menu event handling while the pen button is still dispatching.
+                    point = event.globalPosition().toPoint()
+                    QTimer.singleShot(0, lambda p=point: self.canvas_context_requested.emit(p))
             elif typ == QEvent.Type.TabletRelease:
+                self._secondary_context_suppress_until = time.monotonic() + 0.4
+                self._secondary_tablet_down = False
                 self.ignore_mouse = False
             event.accept()
             return
@@ -1637,8 +1646,10 @@ class Canvas(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
-        """Right click is not a paint stroke; delegate tool menus to MainWindow."""
-        if not self.playing and self.tool in ('brush', 'eraser'):
+        """Ignore the synthetic menu event accompanying a Wacom tablet press."""
+        if (not self._secondary_tablet_down
+                and time.monotonic() >= self._secondary_context_suppress_until
+                and not self.playing and self.tool in ('brush', 'eraser')):
             self.canvas_context_requested.emit(event.globalPos())
         event.accept()
 
@@ -4914,7 +4925,18 @@ class MainWindow(QMainWindow):
         tool = self.canvas.tool
         if tool not in ('brush', 'eraser'):
             return
+        # A tablet-button gesture can generate both tablet and synthesized
+        # context-menu events. Never create a second popup while one is open.
+        active_menu = getattr(self, '_active_canvas_menu', None)
+        if active_menu is not None and active_menu.isVisible():
+            return
         menu = QMenu(self)
+        self._active_canvas_menu = menu
+        def clear_active_menu():
+            if self._active_canvas_menu is menu:
+                self._active_canvas_menu = None
+            menu.deleteLater()
+        menu.aboutToHide.connect(clear_active_menu)
         if tool == 'brush':
             menu.addAction('Brush Library…', lambda: self._open_brush_library(False))
             presets = menu.addMenu('Brush Preset')
@@ -4932,7 +4954,8 @@ class MainWindow(QMainWindow):
                 opacity.addAction(f'{percent}%', lambda checked=False, n=percent: self.brush_opacity.setValue(n))
         menu.addSeparator()
         menu.addAction('Advanced Tool Settings…', lambda: self._docks['tools'].show())
-        menu.exec(global_pos)
+        # Non-blocking popup prevents re-entrant QMenu.exec loops on tablet input.
+        menu.popup(global_pos)
 
     def _timeline_context_menu(self, pos):
         if not self.project_active:
