@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.35.2: tablet context menu hotfix."""
+"""Linux Animation Studio v0.36.0: advanced coloring and SpynFrame icon trial."""
 import io
 import wave
 import time
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region
 
-APP_VERSION = "0.35.2"
+APP_VERSION = "0.36.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -190,6 +190,7 @@ class Layer:
     opacity: int = 100
     mode: str = "animated"  # animated cels or one shared static image
     cel_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    reference: bool = False  # Whether this track can be used for reference-only fill
 
 
 @dataclass
@@ -253,6 +254,7 @@ class Canvas(QWidget):
         self.tool = 'brush'  # brush, eraser, fill, select, transform, pan
         self.fill_tolerance = 24
         self.fill_contiguous = True
+        self.fill_source = "active"  # active, visible, reference
         self.selection = None  # Bounding QRect in document pixels
         self.selection_path = None  # Actual selected geometry, with antialiased edges
         self.selection_mask = None  # ARGB mask shared by raster operations
@@ -1044,7 +1046,7 @@ class Canvas(QWidget):
                 if insert:
                     original = cmd['layer']
                     image = original.image if original.mode == 'static' else (original.image if frame is self.layers else transparent_image(self.width_px, self.height_px))
-                    frame.insert(min(cmd['index'], len(frame)), Layer(original.id, original.name, image, original.visible, original.opacity, original.mode))
+                    frame.insert(min(cmd['index'], len(frame)), Layer(original.id, original.name, image, original.visible, original.opacity, original.mode, reference=original.reference))
                 else:
                     frame[:] = [x for x in frame if x.id != cmd['layer'].id]
             self.active_id = cmd['layer'].id if insert else cmd['previous_active']
@@ -1168,6 +1170,16 @@ class Canvas(QWidget):
         if layer is None:
             return
         cmd = dict(type='property', id=layer.id, field='visible', before=layer.visible, after=not layer.visible)
+        self._apply(cmd, True)
+        self._push(cmd)
+
+    def toggle_reference_layer(self):
+        """Set a track's reference flag across frames using undoable metadata."""
+        layer = self.active_layer()
+        if layer is None or self.playing or self.drawing:
+            return
+        cmd = dict(type='property', id=layer.id, field='reference',
+                   before=layer.reference, after=not layer.reference)
         self._apply(cmd, True)
         self._push(cmd)
 
@@ -1490,12 +1502,33 @@ class Canvas(QWidget):
         """Backwards-compatible explicit clear action for the active cel."""
         return self.clear_active_cel()
 
-    def flood_fill(self, position):
-        """Fill connected pixels on the active raster cel, respecting selections.
+    def _fill_reference_image(self, frame_index):
+        """Compute the read-only image used to locate a bucket region.
 
-        The image used to determine the region is the active layer, rather than
-        the flattened visible composite. Linked cels and static layers share
-        the result through the same undoable cel replacement as Clear Layer.
+        Only visible tracks participate; alpha and layer opacity are applied
+        by Qt. The active target remains independently editable.
+        """
+        source = self.fill_source
+        if source == 'active':
+            return None
+        layers = self.frames[frame_index]
+        chosen = [layer for layer in layers if layer.visible and
+                  (source == 'visible' or (source == 'reference' and layer.reference))]
+        if not chosen:
+            return None
+        rendered = transparent_image(self.width_px, self.height_px)
+        painter = QPainter(rendered)
+        for layer in chosen:
+            painter.setOpacity(layer.opacity / 100.0)
+            painter.drawImage(0, 0, layer.image)
+        painter.end()
+        return rendered
+
+    def flood_fill(self, position):
+        """Fill a target cel from active, all-visible, or reference-layer pixels.
+
+        Reference image is read only; only active layer cels are written.
+        Linked cels, selections and static tracks preserve existing semantics.
         """
         if (self.playing or self.drawing or self.transform_session is not None
                 or self.drag_origin is not None):
@@ -1531,9 +1564,15 @@ class Canvas(QWidget):
                 continue
             seen.add(key)
             before = target.image.copy()
-            # Straight-ARGB conversion avoids comparing premultiplied RGB values
-            # (and properly identifies transparent background regardless of RGB).
-            straight = before.convertToFormat(QImage.Format.Format_ARGB32)
+            if self.fill_source == 'reference' and not any(
+                    item.visible and item.reference for item in self.frames[index]):
+                self.diagnostic.emit('Mark a visible layer as a Fill Reference first.')
+                return False
+            reference_image = self._fill_reference_image(index)
+            # Straight ARGB avoids comparing premultiplied RGB values, and
+            # ensures transparent pixels match independently of hidden RGB.
+            straight = (reference_image if reference_image is not None else before).convertToFormat(
+                QImage.Format.Format_ARGB32)
             region = flood_region(straight.constBits().cast('I'), width, height,
                                   x, y, self.fill_tolerance, self.fill_contiguous,
                                   selection)
@@ -1693,7 +1732,7 @@ class Canvas(QWidget):
     def _copy_layers(self, layers, duplicate=True):
         return [Layer(x.id, x.name,
                       x.image if x.mode == 'static' else (x.image.copy() if duplicate else transparent_image(self.width_px, self.height_px)),
-                      x.visible, x.opacity, x.mode, x.cel_id if x.mode == 'static' else uuid.uuid4().hex) for x in layers]
+                      x.visible, x.opacity, x.mode, x.cel_id if x.mode == 'static' else uuid.uuid4().hex, x.reference) for x in layers]
 
     def set_layer_mode(self, mode):
         """Switch the active track between shared static art and independent cels."""
@@ -1726,7 +1765,7 @@ class Canvas(QWidget):
                 old = previous.get(track.id)
                 image = (track.image if track.mode == 'static' else
                          old.image if old is not None else transparent_image(self.width_px, self.height_px))
-                result.append(Layer(track.id, track.name, image, track.visible, track.opacity, track.mode, old.cel_id if old is not None else uuid.uuid4().hex))
+                result.append(Layer(track.id, track.name, image, track.visible, track.opacity, track.mode, old.cel_id if old is not None else uuid.uuid4().hex, track.reference))
             frame[:] = result
         self.layers = self.frames[self.frame_index]
 
@@ -1742,7 +1781,7 @@ class Canvas(QWidget):
                 if key not in image_cache:
                     image_cache[key] = layer.image.copy()
                 row.append(Layer(layer.id, layer.name, image_cache[key], layer.visible,
-                                 layer.opacity, layer.mode, layer.cel_id))
+                                 layer.opacity, layer.mode, layer.cel_id, layer.reference))
             snapshot.append(row)
         return snapshot
 
@@ -1762,7 +1801,7 @@ class Canvas(QWidget):
                 if key not in cache:
                     cache[key] = layer.image.copy()
                 row.append(Layer(layer.id, layer.name, cache[key], layer.visible,
-                                 layer.opacity, layer.mode, layer.cel_id))
+                                 layer.opacity, layer.mode, layer.cel_id, layer.reference))
             result.append(row)
         return result
 
@@ -2061,7 +2100,8 @@ class Canvas(QWidget):
                     for layer in layers:
                         filename = f'frames/{index}/{layer.id}.png'
                         records.append(dict(id=layer.id, name=layer.name, visible=layer.visible,
-                                            opacity=layer.opacity, mode=layer.mode, cel_id=layer.cel_id, file=filename))
+                                            opacity=layer.opacity, mode=layer.mode, cel_id=layer.cel_id,
+                                            reference=layer.reference, file=filename))
                         archive.writestr(filename, png_bytes(layer.image))
                     manifest['frames'].append(dict(layers=records))
                 for obj in self.motion_objects:
@@ -2122,7 +2162,8 @@ class Canvas(QWidget):
                         raise ValueError('Invalid layer opacity')
                     layers.append(Layer(lid, str(entry['name']), image,
                                         bool(entry['visible']), opacity, entry.get('mode', 'animated') if version >= 4 else 'animated',
-                                        entry.get('cel_id', uuid.uuid4().hex) if version >= 5 else uuid.uuid4().hex))
+                                        entry.get('cel_id', uuid.uuid4().hex) if version >= 5 else uuid.uuid4().hex,
+                                        bool(entry.get('reference', False))))
                 frames.append(layers)
             # Older projects can contain independently created layers per frame.
             # Promote every unique ID to its own persistent track, preserving art.
@@ -2142,7 +2183,8 @@ class Canvas(QWidget):
                 aligned.append([Layer(template.id, template.name,
                     lookup[template.id].image if template.id in lookup else transparent_image(width, height),
                     template.visible, template.opacity, template.mode,
-                    lookup[template.id].cel_id if template.id in lookup else uuid.uuid4().hex) for template in definitions])
+                    lookup[template.id].cel_id if template.id in lookup else uuid.uuid4().hex,
+                    template.reference) for template in definitions])
             frames = aligned
             for track_index, template in enumerate(definitions):
                 if template.mode == 'static':
@@ -3304,6 +3346,18 @@ class MainWindow(QMainWindow):
         self.fill_contiguous_check.setChecked(True)
         self.fill_contiguous_check.toggled.connect(lambda checked: setattr(self.canvas, 'fill_contiguous', checked))
         left.addWidget(self.fill_contiguous_check)
+        left.addWidget(QLabel('Fill sample source'))
+        self.fill_source_input = QComboBox()
+        for title, source in (('Active layer', 'active'),
+                              ('All visible layers', 'visible'),
+                              ('Marked reference layers', 'reference')):
+            self.fill_source_input.addItem(title, source)
+        self.fill_source_input.setToolTip(
+            'Where the bucket finds boundaries. The fill always paints the active layer. '
+            'Right-click a layer to mark it as a fill reference.')
+        self.fill_source_input.currentIndexChanged.connect(
+            lambda i: setattr(self.canvas, 'fill_source', self.fill_source_input.itemData(i)))
+        left.addWidget(self.fill_source_input)
         left.addStretch()
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
@@ -4835,7 +4889,8 @@ class MainWindow(QMainWindow):
         self.layers_list.blockSignals(True)
         self.layers_list.clear()
         for layer in reversed(self.canvas.layers):
-            item = QListWidgetItem(layer_eye_icon(layer.visible), layer.name)
+            item = QListWidgetItem(layer_eye_icon(layer.visible),
+                ('◇ ' if layer.reference else '') + layer.name)
             item.setData(Qt.ItemDataRole.UserRole, layer.id)
             self.layers_list.addItem(item)
             if layer.id == self.canvas.active_id:
@@ -4908,6 +4963,10 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction('Rename Layer…', self.rename_layer)
         menu.addAction('Show Layer' if not layer.visible else 'Hide Layer', self.canvas.toggle_visibility)
+        reference_action = menu.addAction('Use as Fill Reference')
+        reference_action.setCheckable(True)
+        reference_action.setChecked(layer.reference)
+        reference_action.triggered.connect(self.canvas.toggle_reference_layer)
         menu.addSeparator()
         up = menu.addAction('Move Up', lambda: self.canvas.move_layer(1))
         down = menu.addAction('Move Down', lambda: self.canvas.move_layer(-1))

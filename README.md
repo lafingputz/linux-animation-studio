@@ -1,3 +1,28 @@
+# Linux Animation Studio v0.36.0: Advanced Coloring + SpynFrame Icon Trial
+
+**Test candidate, not an official release.** The application name and executable remain Linux Animation Studio; `.las` project format **v6** is unchanged. The supplied SpynFrame SVG has been used to create native application icons for Linux, Windows and macOS, with the original SVG retained at `assets/spynframe-icon.svg`.
+
+## New in this test candidate
+
+- **Bucket / Fill sample source** in the Tools panel: **Active layer** (the existing behavior), **All visible layers**, or **Marked reference layers**.
+- In the Layers panel, right-click a layer and toggle **Use as Fill Reference**. Marked reference layers are prefixed with `◇` in the layer list. Reference flags are saved in `.las` project manifests and are undoable.
+- A fill analyzes the chosen source but **only modifies the active layer's cel(s)**. Existing selections, linked cels, multi-frame opt-in, visibility and static-layer behavior remain supported.
+- **Icon trial:** custom branded PNG, ICO and ICNS generated directly from the supplied Illustrator SVG, with NO application rename yet.
+
+### Suggested cross-platform acceptance tests
+
+1. **Active source:** draw a closed outline on the active layer, select **Active layer**, fill inside and confirm usual behavior; Undo/Redo.
+2. **All visible:** put a closed outline on Layer 1, create an empty Layer 2 above it, choose **All visible layers**, fill inside. Verify Layer 1 remains unchanged and Layer 2 contains just the fill. Undo/Redo, then hide Layer 1 and check that it no longer constrains the fill.
+3. **Reference source:** right-click Layer 1 → **Use as Fill Reference**; choose **Marked reference layers**, and fill on empty Layer 2. Confirm only marked visible layers form boundaries. Switch the marker off and verify the tool refuses a reference fill if no reference layers remain.
+4. Save/reopen the `.las` file and confirm reference markers remain. Open an older v6 `.las` project and confirm all reference markers default off. Test switching frames and linked cels.
+5. Try selection boundaries, contiguous/global mode, tolerance changes, hidden reference layers, layer opacity, multi-frame editing and static backgrounds.
+6. Check the SpynFrame icon in the Windows app/taskbar and installer, macOS Dock/DMG, and Linux launcher, including small sizes. The **app name must still say Linux Animation Studio**.
+7. Run `python -m unittest discover -s tests -v` with the platform's virtualenv Python and complete the existing pen-pressure, menu, timeline, audio, export and installer smoke tests.
+
+**Known limitations:** The reference fill samples visible raster layers, not motion-object transformations; complex vector/raster fill improvements (edge expansion, antialias bleed, gap closing) are outside this initial candidate. An empty reference-only source results in no fill. Layer reference metadata is kept inside the existing v6 format as an optional field; older applications may discard the reference flag if they resave the project. Keep a project backup.
+
+---
+
 # Linux Animation Studio v0.35.2
 
 **Input & Workflow Stabilization** (test candidate). Built on validated v0.34.1. LAS `.las` format **remains v6**. Existing drawing, animation, audio, packaging, Paint Bucket and GitHub feedback tools are retained.
