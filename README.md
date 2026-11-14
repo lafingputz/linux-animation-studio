@@ -2,6 +2,17 @@
 
 **Test candidate, not an official release.** The application still uses the Linux Animation Studio name, trial SpynFrame icon, and `.las` v6 project format. Native validation is required on Windows, Pop!_OS, and macOS.
 
+## Updated v0.38.0 theme test candidate (Windows System appearance fix)
+
+The revised test candidate fixes System appearance on Windows: it reads the
+Windows **AppsUseLightTheme** preference instead of restoring a potentially
+bright generic Qt palette. On Linux/macOS, System uses the Qt platform color
+scheme when available. All modes now use a consistent Qt Fusion palette with
+explicit high-contrast menu colors. Existing theme, accent and project
+preferences are retained. If you installed an earlier v0.38.0 test candidate,
+replace it with this revised source package and retest System, Light and Dark
+with the application restarted.
+
 ## New in v0.38.0
 
 - **Edit → Preferences…** offers application appearance **System**, **Light**, and **Dark**, plus a selectable **accent color**. Appearance settings persist in QSettings between launches and never modify project pixels. Existing Drawing/Animation workspace layouts and dock panels are preserved; Preferences includes an informational Workspaces tab. System mode uses the OS/Qt palette; detecting OS appearance changes may require restarting the app. Some legacy dock/button colors retain their original styling.

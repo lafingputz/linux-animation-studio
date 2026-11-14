@@ -31,6 +31,7 @@ from feedback_support import feedback_url, normalize_repository, read_packaged_r
 from fill_support import flood_region, expand_region, edge_aware_expand_region
 from shortcut_conflicts import find_shortcut_conflicts
 from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions
+from appearance_support import resolve_system_theme, windows_apps_use_light_theme
 
 APP_VERSION = "0.38.0"
 WIDTH, HEIGHT = 1200, 800
@@ -6059,9 +6060,36 @@ class MainWindow(QMainWindow):
         if not QColor(accent).isValid():
             accent = '#e58532'
         if theme == 'System':
-            app.setPalette(app.style().standardPalette())
-        else:
-            app.setPalette(make_application_palette(theme, accent))
+            # On Windows, Qt's standardPalette() can be bright even when the
+            # user selected dark mode for apps. Read the Windows app theme
+            # directly, falling back to Qt's color-scheme hint elsewhere.
+            try:
+                scheme = int(app.styleHints().colorScheme().value)
+            except (AttributeError, TypeError, ValueError):
+                scheme = 0
+            base = app.style().standardPalette()
+            dark_background = base.color(QPalette.ColorRole.Window).lightness() < 128
+            windows_light = windows_apps_use_light_theme() if sys.platform == 'win32' else None
+            theme = resolve_system_theme(sys.platform, windows_light=windows_light,
+                                         qt_scheme=scheme, fallback_dark=dark_background)
+        # Fusion honors the palette for menus, tabs, controls and dock widgets
+        # across Windows, Linux, and macOS; native styles may ignore roles.
+        app.setStyle('Fusion')
+        app.setPalette(make_application_palette(theme, accent))
+        # Explicit menu contrast prevents white-on-light or dark-on-dark menus
+        # even when platform-specific menu styling overrides palette roles.
+        dark = theme == 'Dark'
+        menu_bg = '#2b303a' if dark else '#ffffff'
+        menu_text = '#f3f4f8' if dark else '#20232b'
+        menu_border = '#707987' if dark else '#aeb7c3'
+        app.setStyleSheet('QMenu {{ background-color: {bg}; color: {fg}; '
+                          'border: 1px solid {border}; }} '
+                          'QMenu::item {{ padding: 5px 22px; }} '
+                          'QMenu::item:selected {{ background-color: {accent}; '
+                          'color: {selected}; }}'.format(
+                              bg=menu_bg, fg=menu_text, border=menu_border,
+                              accent=accent,
+                              selected='#ffffff' if QColor(accent).lightness() < 160 else '#111111'))
         # The workspace splitter and floating-dock styles are intentionally
         # managed independently, preserving pre-existing dock affordances.
 
@@ -6095,7 +6123,7 @@ class MainWindow(QMainWindow):
                 swatch.setStyleSheet(f'color: {accent.name()}; font-size: 24px')
         color_button.clicked.connect(pick_accent)
         note = QLabel('Themes affect the interface, not drawing pixels or .las documents.\n'
-                      'System follows the operating system palette on restart.')
+                      'System follows the operating system app appearance on restart.')
         note.setWordWrap(True)
         form.addRow(note)
         tabs.addTab(appearance, 'Appearance')
