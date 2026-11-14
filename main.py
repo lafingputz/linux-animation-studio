@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.36.1: Paint Bucket edge expansion and cleanup."""
+"""Linux Animation Studio v0.36.2: Edge-aware Paint Bucket and expanded controls."""
 import io
 import wave
 import time
@@ -28,9 +28,9 @@ from PySide6.QtWidgets import (
 )
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
-from fill_support import flood_region, expand_region
+from fill_support import flood_region, expand_region, edge_aware_expand_region
 
-APP_VERSION = "0.36.1"
+APP_VERSION = "0.36.2"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -254,6 +254,8 @@ class Canvas(QWidget):
         self.tool = 'brush'  # brush, eraser, fill, select, transform, pan
         self.fill_tolerance = 24
         self.fill_expansion = 2
+        self.fill_edge_aware = True
+        self.fill_opacity = 100
         self.fill_contiguous = True
         self.fill_source = "active"  # active, visible, reference
         self.selection = None  # Bounding QRect in document pixels
@@ -546,7 +548,7 @@ class Canvas(QWidget):
         if self.hover_position is not None and not self.playing:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             center = self.hover_position
-            if self.tool in ('brush', 'eraser'):
+            if self.tool in ('brush', 'eraser', 'fill'):
                 diameter = self.size if self.tool == 'eraser' else self.size * (0.15 + 0.85 * self.hover_pressure)
                 r = max(0.5, diameter / 2.0)
                 p.setBrush(Qt.BrushStyle.NoBrush)
@@ -1580,13 +1582,19 @@ class Canvas(QWidget):
             if not any(region):
                 continue
             expansion = max(0, min(10, int(self.fill_expansion)))
-            expanded = expand_region(region, width, height, expansion, selection)
+            expanded = (edge_aware_expand_region(
+                region, straight.constBits().cast('I'), width, height,
+                expansion, selection, self.fill_tolerance)
+                if self.fill_edge_aware else
+                expand_region(region, width, height, expansion, selection))
             # The expansion fringe is painted *behind* existing pixels when
             # sampling the target layer. This preserves anti-aliased ink: the
             # new color shows through transparent edge pixels without covering
             # their original shade. On reference/visible sampling the outline
             # normally resides on another layer, so normal SourceOver applies.
             argb = self.color.rgba()
+            fill_alpha = ((argb >> 24) & 255) * max(0, min(100, int(self.fill_opacity))) // 100
+            argb = (argb & 0x00ffffff) | (fill_alpha << 24)
             premul = QColor.fromRgba(argb).rgba()
             if (argb >> 24) != 255:
                 a = argb >> 24
@@ -1629,7 +1637,7 @@ class Canvas(QWidget):
         command = dict(type='cel_clear', changes=changes)
         self._apply(command, True)
         self._push(command)
-        self.diagnostic.emit(f'Filled {len(changes)} cel(s); tolerance {self.fill_tolerance}, expansion {self.fill_expansion}px.')
+        self.diagnostic.emit(f'Filled {len(changes)} cel(s); tolerance {self.fill_tolerance}, expansion {self.fill_expansion}px, opacity {self.fill_opacity}%.')
         return True
 
     def tabletEvent(self, event):
@@ -1648,7 +1656,7 @@ class Canvas(QWidget):
                 self.ignore_mouse = True
                 if self.drawing and self.input_kind == 'tablet':
                     self._end_stroke()
-                if not self._secondary_tablet_down and not self.playing and self.tool in ('brush', 'eraser'):
+                if not self._secondary_tablet_down and not self.playing and self.tool in ('brush', 'eraser', 'fill'):
                     self._secondary_tablet_down = True
                     self._secondary_context_suppress_until = time.monotonic() + 0.4
                     # Defer until the tablet event returns; avoid entering Qt's
@@ -1706,7 +1714,7 @@ class Canvas(QWidget):
         """Ignore the synthetic menu event accompanying a Wacom tablet press."""
         if (not self._secondary_tablet_down
                 and time.monotonic() >= self._secondary_context_suppress_until
-                and not self.playing and self.tool in ('brush', 'eraser')):
+                and not self.playing and self.tool in ('brush', 'eraser', 'fill')):
             self.canvas_context_requested.emit(event.globalPos())
         event.accept()
 
@@ -3371,6 +3379,23 @@ class MainWindow(QMainWindow):
             lambda value: setattr(self.canvas, 'fill_expansion', value))
         self.fill_expansion_input.editingFinished.connect(self.return_canvas_focus)
         left.addWidget(self.fill_expansion_input)
+        self.fill_edge_aware_check = QCheckBox('Respect stroke edges (conservative)')
+        self.fill_edge_aware_check.setChecked(self.canvas.fill_edge_aware)
+        self.fill_edge_aware_check.setToolTip(
+            'Limit fill expansion to detected line-art pixels, leaving an outer safety rim. '
+            'For soft or open outlines, some gaps may remain.')
+        self.fill_edge_aware_check.toggled.connect(
+            lambda enabled: setattr(self.canvas, 'fill_edge_aware', enabled))
+        left.addWidget(self.fill_edge_aware_check)
+        left.addWidget(QLabel('Fill opacity'))
+        self.fill_opacity_input = QSpinBox()
+        self.fill_opacity_input.setRange(0, 100)
+        self.fill_opacity_input.setSuffix(' %')
+        self.fill_opacity_input.setValue(self.canvas.fill_opacity)
+        self.fill_opacity_input.valueChanged.connect(
+            lambda value: setattr(self.canvas, 'fill_opacity', value))
+        self.fill_opacity_input.editingFinished.connect(self.return_canvas_focus)
+        left.addWidget(self.fill_opacity_input)
         self.fill_contiguous_check = QCheckBox('Contiguous (connected area only)')
         self.fill_contiguous_check.setChecked(True)
         self.fill_contiguous_check.toggled.connect(lambda checked: setattr(self.canvas, 'fill_contiguous', checked))
@@ -5011,7 +5036,7 @@ class MainWindow(QMainWindow):
         if not self.project_active:
             return
         tool = self.canvas.tool
-        if tool not in ('brush', 'eraser'):
+        if tool not in ('brush', 'eraser', 'fill'):
             return
         # A tablet-button gesture can generate both tablet and synthesized
         # context-menu events. Never create a second popup while one is open.
@@ -5030,8 +5055,44 @@ class MainWindow(QMainWindow):
             presets = menu.addMenu('Brush Preset')
             for name in ('Round', 'Pencil', 'Ink', 'Airbrush'):
                 presets.addAction(name, lambda checked=False, n=name: self._quick_brush(n))
-        else:
+        elif tool == 'eraser':
             menu.addAction('Eraser Library…', lambda: self._open_brush_library(True))
+        if tool == 'fill':
+            # Use the same live controls as the Tools dock, so the UI never
+            # maintains a second conflicting set of bucket settings.
+            from PySide6.QtWidgets import QWidgetAction
+            def spin_row(title, original):
+                row = QWidget(menu)
+                layout = QHBoxLayout(row)
+                layout.setContentsMargins(8, 3, 8, 3)
+                layout.addWidget(QLabel(title))
+                spin = QSpinBox(row)
+                spin.setRange(original.minimum(), original.maximum())
+                spin.setValue(original.value())
+                spin.valueChanged.connect(original.setValue)
+                layout.addWidget(spin)
+                action = QWidgetAction(menu)
+                action.setDefaultWidget(row)
+                menu.addAction(action)
+            spin_row('Tolerance', self.fill_tolerance_input)
+            spin_row('Expansion (px)', self.fill_expansion_input)
+            spin_row('Opacity (%)', self.fill_opacity_input)
+            edge_action = menu.addAction('Respect stroke edges')
+            edge_action.setCheckable(True)
+            edge_action.setChecked(self.fill_edge_aware_check.isChecked())
+            edge_action.toggled.connect(self.fill_edge_aware_check.setChecked)
+            contig = menu.addAction('Contiguous fill')
+            contig.setCheckable(True)
+            contig.setChecked(self.fill_contiguous_check.isChecked())
+            contig.toggled.connect(self.fill_contiguous_check.setChecked)
+            sources = menu.addMenu('Sample source')
+            for i in range(self.fill_source_input.count()):
+                source_action = sources.addAction(self.fill_source_input.itemText(i))
+                source_action.setCheckable(True)
+                source_action.setChecked(self.fill_source_input.currentIndex() == i)
+                source_action.triggered.connect(lambda checked=False, n=i: self.fill_source_input.setCurrentIndex(n))
+            menu.popup(global_pos)
+            return
         menu.addSeparator()
         size = menu.addMenu('Size')
         for pixels in (5, 10, 20, 40, 80, 160):

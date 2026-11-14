@@ -8,7 +8,7 @@ SRC = (ROOT / 'main.py').read_text(encoding='utf-8')
 
 class Stabilization351Tests(unittest.TestCase):
     def test_version_and_format(self):
-        self.assertIn('APP_VERSION = "0.36.1"', SRC)
+        self.assertIn('APP_VERSION = "0.36.2"', SRC)
         self.assertIn('PROJECT_VERSION = 6', SRC)
 
     def test_builtin_selection_clears_custom_state(self):

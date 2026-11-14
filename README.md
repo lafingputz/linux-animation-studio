@@ -1,6 +1,11 @@
-# Linux Animation Studio v0.36.1: Paint Bucket Edge Expansion + SpynFrame Icon Trial
+# Linux Animation Studio v0.36.2: Edge-Aware Paint Bucket & Controls
 
-## v0.36.1 changes
+## v0.36.2 changes
+
+- Paint Bucket **Respect stroke edges** option enables conservative ink-aware expansion, which avoids growing into clear background outside the stroke. Because artistic edges can be ambiguous, especially with thin/soft strokes, inspect results and adjust expansion or disable the option as needed.
+- Paint Bucket now has a nonblocking right-click settings menu for tolerance, expansion, opacity, contiguous mode and sample source.
+- Independent Paint Bucket opacity (0–100%) in Tools and its menu.
+
 
 - Added **Fill expansion (pixels)** to the Paint Bucket Tools settings: 0–10 px, default 2.
 - Expansion grows the selected fill mask separately from RGBA tolerance, reducing gaps at antialiased outlines.
@@ -9,7 +14,7 @@
 - Selection mask and canvas boundaries constrain expanded fills; existing multi-frame, linked-cel and undo paths are retained.
 - SpynFrame icon trial, Linux Animation Studio name, and `.las` version 6 remain unchanged.
 
-**Note:** Expansion is a square-neighborhood mask grow. With very thin/open lines, larger expansion values can cross boundaries; start with 1–2 px. For on-layer fills, the expanded fringe is placed behind existing pixels.
+**Behavior:** With **Respect stroke edges** enabled (default), the tool first grows the fill mask and then limits the fringe to probable stroke pixels, keeping an outer safety rim. The mode is conservative: very soft, textured or open contours may still leave a subtle halo. Disabling this mode restores v0.36.1-style unrestricted expansion, which **can spill past outlines**. For active-layer filling, the expansion fringe is painted behind existing pixels. The change is not a guaranteed general-purpose contour reconstruction algorithm.
 
 
 **Test candidate, not an official release.** The application name and executable remain Linux Animation Studio; `.las` project format **v6** is unchanged. The supplied SpynFrame SVG has been used to create native application icons for Linux, Windows and macOS, with the original SVG retained at `assets/spynframe-icon.svg`.
@@ -21,6 +26,16 @@
 - A fill analyzes the chosen source but **only modifies the active layer's cel(s)**. Existing selections, linked cels, multi-frame opt-in, visibility and static-layer behavior remain supported.
 - **Icon trial:** custom branded PNG, ICO and ICNS generated directly from the supplied Illustrator SVG, with NO application rename yet.
 
+### New v0.36.2 focused acceptance tests
+
+1. With a 1–2 px closed ink outline and expansion set to **8–10 px**, fill the inside. With **Respect stroke edges** on, verify there is no color outside the line, and compare with the old behavior when toggled off.
+2. Repeat with thick (8–15 px) outlines, anti-aliased Round/Ink/Pencil strokes, and opaque white backgrounds. Look closely for halos or leaks.
+3. Repeat using **Active layer**, **All visible layers**, and **Marked reference layers**, keeping line art and fill on separate layers where possible.
+4. Right-click the canvas using a **mouse and a stylus side button** with Paint Bucket selected. Adjust tolerance, expansion, fill opacity, contiguous, sample source, and the edge-aware toggle. Confirm the Tools dock values synchronize; menus dismiss normally and don't stack.
+5. Set fill opacity to **0, 25, 50, 75, 100%** on empty and painted cels. Verify blend behavior and that Brush opacity doesn't change.
+6. Verify hard selection boundaries, linked cels, multi-frame edits and Undo/Redo for every fill mode. Check export PNG/MP4 and project save/load.
+7. Benchmark large 1200×800 fills on the **Surface Pro 3**, and confirm input remains responsive enough. Run full automated tests and all-platform installers.
+
 ### Suggested cross-platform acceptance tests
 
 1. **Active source:** draw a closed outline on the active layer, select **Active layer**, fill inside and confirm usual behavior; Undo/Redo.
@@ -31,7 +46,7 @@
 6. Check the SpynFrame icon in the Windows app/taskbar and installer, macOS Dock/DMG, and Linux launcher, including small sizes. The **app name must still say Linux Animation Studio**.
 7. Run `python -m unittest discover -s tests -v` with the platform's virtualenv Python and complete the existing pen-pressure, menu, timeline, audio, export and installer smoke tests.
 
-**Known limitations:** The reference fill samples visible raster layers, not motion-object transformations; complex vector/raster fill improvements (edge expansion, antialias bleed, gap closing) are outside this initial candidate. An empty reference-only source results in no fill. Layer reference metadata is kept inside the existing v6 format as an optional field; older applications may discard the reference flag if they resave the project. Keep a project backup.
+**Known limitations:** The reference fill samples visible raster layers, not motion-object transformations. Edge recognition uses source-image alpha/color contrast and may misclassify textured, translucent, broken, or complex overlapping strokes; gap closing is not implemented. An empty reference-only source results in no fill. Layer reference metadata is kept inside the existing v6 format as an optional field; older applications may discard the reference flag if they resave the project. Keep a project backup.
 
 ---
 
