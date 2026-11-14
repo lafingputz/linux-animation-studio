@@ -1,4 +1,4 @@
-"""v0.37.3: every temporary canvas navigation key is user-configurable."""
+"""v0.38.0: every temporary canvas navigation key is user-configurable."""
 from pathlib import Path
 import unittest
 
@@ -32,9 +32,9 @@ class NavigationKeySourceTests(unittest.TestCase):
         self.assertNotIn("Space is reserved for canvas panning", SRC)
 
     def test_versions_and_file_format(self):
-        self.assertIn('APP_VERSION = "0.37.3"',SRC)
+        self.assertIn('APP_VERSION = "0.38.0"',SRC)
         self.assertIn('PROJECT_VERSION = 6',SRC)
-        self.assertIn("VERSION = '0.37.3'",(ROOT/'tools/package_release.py').read_text())
+        self.assertIn("VERSION = '0.38.0'",(ROOT/'tools/package_release.py').read_text())
 
 try:
     from PySide6.QtCore import Qt, QEvent

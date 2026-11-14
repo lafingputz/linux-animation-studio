@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.37.3: customizable canvas navigation shortcuts."""
+"""Linux Animation Studio v0.38.0: themes, preferences, and project setup."""
 import io
 import wave
 import time
@@ -19,7 +19,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
+from PySide6.QtGui import QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
@@ -30,8 +30,9 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region, expand_region, edge_aware_expand_region
 from shortcut_conflicts import find_shortcut_conflicts
+from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions
 
-APP_VERSION = "0.37.3"
+APP_VERSION = "0.38.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -3389,6 +3390,213 @@ class WaylandFloatingDockHandle(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+
+# Presentation preferences are strictly application-local, never stored in .las.
+def make_application_palette(theme, accent):
+    """Return a Qt palette for explicit light/dark themes."""
+    dark = theme == 'Dark'
+    palette = QPalette()
+    colors = {
+        QPalette.ColorRole.Window: '#252932' if dark else '#f3f4f7',
+        QPalette.ColorRole.WindowText: '#f3f4f8' if dark else '#20232b',
+        QPalette.ColorRole.Base: '#1d2028' if dark else '#ffffff',
+        QPalette.ColorRole.AlternateBase: '#303640' if dark else '#e9edf2',
+        QPalette.ColorRole.Text: '#f3f4f8' if dark else '#20232b',
+        QPalette.ColorRole.Button: '#373d49' if dark else '#e3e7ee',
+        QPalette.ColorRole.ButtonText: '#f3f4f8' if dark else '#20232b',
+        QPalette.ColorRole.ToolTipBase: '#353b46' if dark else '#fff9e9',
+        QPalette.ColorRole.ToolTipText: '#ffffff' if dark else '#20232b',
+        QPalette.ColorRole.Highlight: accent,
+        QPalette.ColorRole.HighlightedText: '#ffffff' if QColor(accent).lightness() < 160 else '#111111',
+        QPalette.ColorRole.PlaceholderText: '#a7adb7' if dark else '#707987',
+        QPalette.ColorRole.Mid: '#646c78' if dark else '#aeb7c3',
+        QPalette.ColorRole.Dark: '#151821' if dark else '#b1b8c2',
+        QPalette.ColorRole.Light: '#555d69' if dark else '#ffffff',
+    }
+    for role, value in colors.items():
+        palette.setColor(role, QColor(value))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor('#898d95'))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor('#898d95'))
+    return palette
+
+
+class NewProjectDialog(QDialog):
+    """Single project-creation dialog; all saved dimensions are pixels."""
+    def __init__(self, preferences, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('New Project')
+        self.setMinimumWidth(430)
+        self.setObjectName('LASNewProjectDialog')
+        self._refreshing = False
+        self._pixel_width = 1200
+        self._pixel_height = 800
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.preset = QComboBox()
+        for key, label in PROJECT_PRESETS:
+            self.preset.addItem(label, key)
+        form.addRow('Canvas preset:', self.preset)
+        self.unit = QComboBox()
+        for value, label in [('px', 'Pixels (px)'), ('in', 'Inches (in)'), ('mm', 'Millimeters (mm)')]:
+            self.unit.addItem(label, value)
+        form.addRow('Measurement unit:', self.unit)
+        self.width_field = QDoubleSpinBox()
+        self.height_field = QDoubleSpinBox()
+        for field in (self.width_field, self.height_field):
+            field.setRange(0.01, 16384)
+            field.setDecimals(2)
+        form.addRow('Width:', self.width_field)
+        form.addRow('Height:', self.height_field)
+        self.ppi = QSpinBox()
+        self.ppi.setRange(1, 1200)
+        self.ppi.setValue(300)
+        self.ppi.setToolTip('Pixels per inch for physical units; canvas pixels do not change when switching units.')
+        form.addRow('Resolution (PPI):', self.ppi)
+        self.fps = QSpinBox()
+        self.fps.setRange(1, 60)
+        self.fps.setValue(12)
+        form.addRow('Animation FPS:', self.fps)
+        layout.addLayout(form)
+        self.preview = QLabel()
+        self.preview.setMinimumHeight(112)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setToolTip('Approximate canvas proportions (not pixel-for-pixel size)')
+        layout.addWidget(self.preview)
+        self.summary = QLabel()
+        self.summary.setObjectName('LASProjectPixelSummary')
+        layout.addWidget(self.summary)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Create Project')
+        self.buttons.accepted.connect(self._accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.preset.currentIndexChanged.connect(self._choose_preset)
+        self.unit.currentIndexChanged.connect(self._display_pixels)
+        self.ppi.valueChanged.connect(self._ppi_changed)
+        self.fps.valueChanged.connect(self._fps_changed)
+        self.width_field.valueChanged.connect(self._dimensions_changed)
+        self.height_field.valueChanged.connect(self._dimensions_changed)
+        try:
+            saved_ppi = int(preferences.value('new_project/ppi', 300))
+            self.ppi.setValue(max(1, min(1200, saved_ppi)))
+            self.fps.setValue(max(1, min(60, int(preferences.value('new_project/fps', 12)))))
+            saved_unit = str(preferences.value('new_project/unit', 'px'))
+            self.unit.setCurrentIndex(max(0, self.unit.findData(saved_unit)))
+            self._pixel_width = max(1, min(16384, int(preferences.value('new_project/width', 1200))))
+            self._pixel_height = max(1, min(16384, int(preferences.value('new_project/height', 800))))
+            saved_preset = str(preferences.value('new_project/preset', 'default'))
+            self.preset.blockSignals(True)
+            self.preset.setCurrentIndex(max(0, self.preset.findData(saved_preset)))
+            self.preset.blockSignals(False)
+        except (ValueError, TypeError):
+            pass
+        self._display_pixels()
+        self._preferences = preferences
+
+    def _choose_preset(self):
+        if self._refreshing:
+            return
+        key = self.preset.currentData()
+        if key == 'custom':
+            return
+        if key in ('a4', 'photo', 'letter'):
+            self._refreshing = True
+            self.unit.setCurrentIndex(self.unit.findData('mm' if key == 'a4' else 'in'))
+            self._refreshing = False
+        if key == 'screen':
+            # A screen preset uses the display containing this dialog, not a fixed iPad size.
+            screen = self.screen() or QApplication.primaryScreen()
+            geometry = screen.size() if screen else None
+            ratio = screen.devicePixelRatio() if screen else 1.0
+            self._pixel_width = round(geometry.width() * ratio) if geometry else 1200
+            self._pixel_height = round(geometry.height() * ratio) if geometry else 800
+        else:
+            self._pixel_width, self._pixel_height = preset_dimensions(key, self.ppi.value())
+        self._pixel_width = min(16384, self._pixel_width)
+        self._pixel_height = min(16384, self._pixel_height)
+        self._display_pixels()
+
+    def _ppi_changed(self, *_):
+        # Keep printed dimensions constant when DPI changes; an A4 or photo
+        # preset should still physically measure A4 or 6×4 inches.
+        if self._refreshing:
+            return
+        if self.preset.currentData() in ('a4', 'photo', 'letter'):
+            self._choose_preset()
+        elif self.unit.currentData() in ('in', 'mm'):
+            self._dimensions_changed()
+            self._display_pixels()
+        else:
+            self._display_pixels()
+
+    def _display_pixels(self, *_):
+        self._refreshing = True
+        unit = self.unit.currentData() or 'px'
+        ppi = self.ppi.value()
+        for field, px in ((self.width_field, self._pixel_width), (self.height_field, self._pixel_height)):
+            field.blockSignals(True)
+            field.setDecimals(0 if unit == 'px' else 3)
+            field.setSingleStep(1 if unit == 'px' else 0.1)
+            field.setRange(1 if unit == 'px' else 0.001, 16384 if unit == 'px' else 20000)
+            field.setValue(pixels_to_unit(px, unit, ppi))
+            field.blockSignals(False)
+        self.summary.setText(f'Actual canvas: {self._pixel_width:,} × {self._pixel_height:,} pixels • {self.fps.value()} FPS')
+        self._draw_preview()
+        self._refreshing = False
+
+    def _draw_preview(self):
+        """Draw a tiny proportion preview without allocating a canvas image."""
+        pix = QPixmap(330, 110)
+        pix.fill(QColor('#424850'))
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        ratio = self._pixel_width / max(1, self._pixel_height)
+        width = min(298, int(92 * ratio))
+        height = min(92, int(298 / max(.001, ratio)))
+        # Keep both dimensions inside the 298×92 preview viewport.
+        scale = min(298 / max(1, self._pixel_width), 92 / max(1, self._pixel_height))
+        width = max(2, round(self._pixel_width * scale))
+        height = max(2, round(self._pixel_height * scale))
+        painter.setBrush(QColor('#e8e9ed'))
+        painter.setPen(QPen(QColor('#e58532'), 2))
+        painter.drawRect((330-width)//2, (110-height)//2, width, height)
+        painter.end()
+        self.preview.setPixmap(pix)
+
+    def _fps_changed(self, *_):
+        self.summary.setText(f'Actual canvas: {self._pixel_width:,} × {self._pixel_height:,} pixels • {self.fps.value()} FPS')
+
+    def _dimensions_changed(self, *_):
+        if self._refreshing:
+            return
+        unit = self.unit.currentData() or 'px'
+        ppi = self.ppi.value()
+        self._pixel_width = unit_to_pixels(self.width_field.value(), unit, ppi)
+        self._pixel_height = unit_to_pixels(self.height_field.value(), unit, ppi)
+        self._refreshing = True
+        self.preset.setCurrentIndex(self.preset.findData('custom'))
+        self._refreshing = False
+        self.summary.setText(f'Actual canvas: {self._pixel_width:,} × {self._pixel_height:,} pixels • {self.fps.value()} FPS')
+        self._draw_preview()
+
+    def _accept(self):
+        try:
+            validate_project_dimensions(self._pixel_width, self._pixel_height)
+        except ValueError as exc:
+            QMessageBox.warning(self, 'Invalid canvas dimensions', str(exc))
+            return
+        self.accept()
+
+    def project_values(self):
+        return self._pixel_width, self._pixel_height, self.fps.value()
+
+    def save_defaults(self):
+        for name, value in [('width', self._pixel_width), ('height', self._pixel_height),
+                            ('fps', self.fps.value()), ('ppi', self.ppi.value()),
+                            ('unit', self.unit.currentData()), ('preset', self.preset.currentData())]:
+            self._preferences.setValue('new_project/' + name, value)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -3410,6 +3618,7 @@ class MainWindow(QMainWindow):
         self.focus_mode = False
         self.focus_restore = {}
         self.preferences = QSettings("LinuxAnimationStudio", "LinuxAnimationStudio")
+        self._apply_appearance()
         # Workspace layouts are UI preferences only, never part of the .las document.
         # Every fresh application launch begins in the uncluttered Drawing workspace.
         self.workspace_mode = 'Drawing'
@@ -4001,6 +4210,7 @@ class MainWindow(QMainWindow):
         editmenu.addAction('Paint Bucket / Flood Fill   (G)', lambda: self._tool_shortcut('fill'))
         editmenu.addSeparator()
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
+        editmenu.addAction('Preferences…', self.show_preferences)
         self._build_animation_menu()
         viewmenu = self.menuBar().addMenu('&View')
         self._reset_rotation_action = viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
@@ -5839,22 +6049,89 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, 'Open failed', str(exc))
 
+    def _apply_appearance(self):
+        """Apply the user-selected application palette without touching project data."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        theme = str(self.preferences.value('appearance/theme', 'System'))
+        accent = str(self.preferences.value('appearance/accent', '#e58532'))
+        if not QColor(accent).isValid():
+            accent = '#e58532'
+        if theme == 'System':
+            app.setPalette(app.style().standardPalette())
+        else:
+            app.setPalette(make_application_palette(theme, accent))
+        # The workspace splitter and floating-dock styles are intentionally
+        # managed independently, preserving pre-existing dock affordances.
+
+    def show_preferences(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Preferences')
+        dialog.setMinimumWidth(390)
+        layout = QVBoxLayout(dialog)
+        tabs = QTabWidget(dialog)
+        appearance = QWidget()
+        form = QFormLayout(appearance)
+        theme = QComboBox()
+        theme.addItems(['System', 'Light', 'Dark'])
+        theme.setCurrentText(str(self.preferences.value('appearance/theme', 'System')))
+        form.addRow('Application theme:', theme)
+        accent = QColor(str(self.preferences.value('appearance/accent', '#e58532')))
+        if not accent.isValid():
+            accent = QColor('#e58532')
+        color_button = QPushButton('Choose accent color…')
+        swatch = QLabel('●')
+        swatch.setStyleSheet(f'color: {accent.name()}; font-size: 24px')
+        color_row = QHBoxLayout()
+        color_row.addWidget(swatch)
+        color_row.addWidget(color_button)
+        form.addRow('Accent:', color_row)
+        def pick_accent():
+            nonlocal accent
+            chosen = QColorDialog.getColor(accent, dialog, 'Choose accent color')
+            if chosen.isValid():
+                accent = chosen
+                swatch.setStyleSheet(f'color: {accent.name()}; font-size: 24px')
+        color_button.clicked.connect(pick_accent)
+        note = QLabel('Themes affect the interface, not drawing pixels or .las documents.\n'
+                      'System follows the operating system palette on restart.')
+        note.setWordWrap(True)
+        form.addRow(note)
+        tabs.addTab(appearance, 'Appearance')
+        workspaces = QWidget()
+        workspace_layout = QVBoxLayout(workspaces)
+        description = QLabel('Drawing and Animation workspaces remain dockable and resizable.\n'
+                             'Use View → Reset Workspace Layout to restore the layout.')
+        description.setWordWrap(True)
+        workspace_layout.addWidget(description)
+        workspace_layout.addStretch()
+        tabs.addTab(workspaces, 'Workspaces')
+        layout.addWidget(tabs)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.preferences.setValue('appearance/theme', theme.currentText())
+            self.preferences.setValue('appearance/accent', accent.name())
+            self._apply_appearance()
+
     def new_project(self):
-        width, ok = QInputDialog.getInt(self, 'New Project', 'Canvas width (px):',
-                                        WIDTH, 1, 8192)
-        if not ok:
+        dialog = NewProjectDialog(self.preferences, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not self._confirm_discard():
             return
-        height, ok = QInputDialog.getInt(self, 'New Project', 'Canvas height (px):',
-                                         HEIGHT, 1, 8192)
-        if not ok or not self._confirm_discard():
-            return
+        width, height, fps = dialog.project_values()
         self.pause_playback()
         self.canvas.reset_document(width, height)
+        self.canvas.fps = fps
+        dialog.save_defaults()
+        self.refresh_frames()
         self.update_color_swatch()
         self._reset_audio()
         self.project_path = None
         self._set_project_active(True)
-        self.status.setText('New unsaved project')
+        self.status.setText(f'New unsaved project: {width} × {height}px, {fps} FPS')
         self.canvas.setFocus()
 
     def close_project(self):

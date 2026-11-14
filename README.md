@@ -1,3 +1,28 @@
+# Linux Animation Studio v0.38.0: Preferences, Themes & Project Setup
+
+**Test candidate, not an official release.** The application still uses the Linux Animation Studio name, trial SpynFrame icon, and `.las` v6 project format. Native validation is required on Windows, Pop!_OS, and macOS.
+
+## New in v0.38.0
+
+- **Edit → Preferences…** offers application appearance **System**, **Light**, and **Dark**, plus a selectable **accent color**. Appearance settings persist in QSettings between launches and never modify project pixels. Existing Drawing/Animation workspace layouts and dock panels are preserved; Preferences includes an informational Workspaces tab. System mode uses the OS/Qt palette; detecting OS appearance changes may require restarting the app. Some legacy dock/button colors retain their original styling.
+- **One New Project dialog**, replacing the two sequential width/height prompts. Controls include canvas **presets**, editable width/height, **pixels/inches/mm**, **PPI**, **FPS (1–60)**, a proportion preview, and actual resulting pixel dimensions.
+- **Factory project defaults:** 1200 × 800 pixels, 12 FPS, 300 PPI. Last accepted New Project settings persist; Cancel does not replace them. A project starts with one blank frame. Changing the unit dropdown keeps actual pixels unchanged; changing physical width/height converts to pixels at the chosen PPI.
+- **Presets:** LAS Default, current monitor Screen Size (using display pixel ratio), Square (2048×2048), 4K Wide (4096×1714), A4 Portrait (210×297 mm), 4×6 Photo Landscape, US Letter Landscape (11×8.5 in), 1080p (1920×1080), UHD 4K (3840×2160), and Custom.
+- **Safety:** Changing appearance or New Project defaults does not alter existing `.las` documents. When creating a new project over an edited project, the existing unsaved-changes confirmation still appears. Saved documents retain project FPS as before; PPI is a creation-time conversion setting, not a new `.las` metadata field.
+
+## Focused cross-platform testing
+
+1. Choose New Project from toolbar and File menu. Confirm **one dialog** replaces two width/height prompts and defaults are 1200×800, 12 FPS (on a fresh preferences profile).
+2. Test Square, 1080p, 4K Wide, UHD 4K, A4, photo, letter, and Screen Size. Confirm the width/height and preview respond, and actual project size is correct.
+3. Switch px → in → mm → px without editing values. Confirm the actual pixel dimensions remain unchanged. Set 6×4 inches at 300 PPI and confirm 1800×1200 px. Set 72 PPI and re-enter 6×4 inches to confirm 432×288 px.
+4. Enter a custom size and 24 FPS, Create Project, then check Timeline FPS and playback. Restart LAS and verify the new-project defaults persist.
+5. Cancel New Project. Confirm no document changes or defaults are saved. Try New with unsaved artwork and use Cancel on the unsaved-changes prompt.
+6. Edit → Preferences → Light, Dark, System; choose accent color. Verify legible text, dialogs, timelines, menus, docks, and that settings persist on restart.
+7. Switch Drawing/Animation workspaces, float/redock panels, save/reopen a v6 `.las` file, verify reference layers/onion skins/audio/brush pressure and exports all work.
+8. Run `python -m unittest discover -s tests -q`, native build and package scripts on Windows/Linux/macOS. Gatekeeper: macOS build is unsigned/unnotarized; open **System Settings → Privacy & Security → Open Anyway** if you trust the application.
+
+---
+
 # Linux Animation Studio v0.37.3: Visual Shortcut Conflict Detection
 
 **Test candidate, not an official release.** This update retains the Linux Animation Studio name, SpynFrame icon trial, and `.las` project format v6. Installers remain unsigned/unnotarized on macOS.
