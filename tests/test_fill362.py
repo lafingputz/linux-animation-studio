@@ -1,4 +1,4 @@
-"""Qt-independent tests of v0.36.2 conservative boundary-aware expansion."""
+"""Qt-independent tests of v0.37.0 conservative boundary-aware expansion."""
 import ast
 from pathlib import Path
 import sys
@@ -89,10 +89,10 @@ class EdgeAwareFillTests(unittest.TestCase):
     def test_source_version_and_controls(self):
         src=(ROOT/'main.py').read_text(encoding='utf-8')
         ast.parse(src)
-        self.assertIn('APP_VERSION = "0.36.2"',src)
+        self.assertIn('APP_VERSION = "0.37.0"',src)
         for fragment in ('edge_aware_expand_region(', "self.fill_edge_aware = True", "self.fill_opacity = 100", "spin_row('Opacity (%)'", "menu.popup(global_pos)"):
             self.assertIn(fragment,src)
         from tools.package_release import VERSION
-        self.assertEqual(VERSION,'0.36.2')
+        self.assertEqual(VERSION,'0.37.0')
 
 if __name__=='__main__': unittest.main()

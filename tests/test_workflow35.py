@@ -8,7 +8,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class WorkflowSourceTests(unittest.TestCase):
     def test_version_and_requested_actions(self):
         source = (ROOT / 'main.py').read_text(encoding='utf-8')
-        self.assertIn('APP_VERSION = "0.36.2"', source)
+        self.assertIn('APP_VERSION = "0.37.0"', source)
         for target in ('class LayerEyeList(', 'def layer_eye_icon(',
                        'def _toggle_layer_visibility_by_id(',
                        'def _layer_context_menu(', 'def _canvas_context_menu(',

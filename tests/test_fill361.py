@@ -71,11 +71,11 @@ class EdgeExpandTests(unittest.TestCase):
 
     def test_source_and_package_version(self):
         source=(ROOT/'main.py').read_text(encoding='utf-8')
-        self.assertIn('APP_VERSION = "0.36.2"',source)
+        self.assertIn('APP_VERSION = "0.37.0"',source)
         self.assertIn('self.fill_expansion = 2',source)
         self.assertIn('expand_region(region, width, height, expansion, selection)',source)
         self.assertIn('CompositionMode_DestinationOver',source)
         from tools.package_release import VERSION
-        self.assertEqual(VERSION,'0.36.2')
+        self.assertEqual(VERSION,'0.37.0')
 
 if __name__=='__main__':unittest.main()

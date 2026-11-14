@@ -1,3 +1,31 @@
+# Linux Animation Studio v0.37.0: Canvas Navigation Overhaul
+
+**Test candidate, not an official release.** This update retains the Linux Animation Studio name, SpynFrame icon trial, and `.las` project format v6. Installers remain unsigned/unnotarized on macOS.
+
+## New in v0.37.0
+
+- **Rotate view (R):** Hold **R** and drag the pen/mouse horizontally to spin the *canvas view* without rotating pixels, cels, thumbnails, or exported artwork. Release R to continue with the previous tool. Tap R without dragging to select the persistent **Rotate** toolbar tool.
+- **Zoom tool (Z):** Hold **Z** and drag right to zoom in or left to zoom out. Release Z to return to the previous drawing tool. Tap Z to select the persistent **Zoom** toolbar tool; click to zoom in, or **Alt+click** to zoom out.
+- **Space + drag:** Preserves temporary pan navigation, with device-specific handling for Wacom tablets and synthesized mouse events. Space takes priority while held.
+- **Trackpads:** Supports native pinch-to-zoom notifications where delivered by Qt/macOS, Qt pinch gestures where supported, and Ctrl/Alt+wheel emulation. Standard two-finger scrolling continues to pan the scroll area. Availability varies by trackpad, Qt, Linux display server, and device drivers.
+- **View → Reset Canvas Rotation (0°):** Restore upright orientation without modifying project artwork. **Ctrl+0** still fits the (possibly rotated) canvas to the viewport.
+- **View-only transform:** The same invertible document-to-screen mapping drives drawing, pressure-sensitive strokes, selections, fill, and transform interactions. Canvas rotation resets when opening a new or existing project; it does not change the `.las` save format.
+
+### Cross-platform acceptance checklist
+
+1. **Temporary R:** Select Brush, hold R, drag horizontally to rotate ~30°, release R, and draw. Confirm Brush stays selected, the stroke follows the pen, and exports stay upright. Repeat for Eraser, Bucket, Selection, and Transform.
+2. **Rotate persistent:** Tap R to select the Rotate toolbar tool; drag to rotate, then use **View → Reset Canvas Rotation** to return to 0°. Check at 90°, negative angles, and Ctrl+0 fit.
+3. **Temporary Z:** With Brush selected, hold Z and drag right to zoom in; drag left to zoom out. Releasing Z restores Brush. Tap Z to select the Zoom tool; click to zoom in and Alt+click to zoom out.
+4. **Space + drag:** Confirm temporary pan still works, especially on Linux/Wayland with a Wacom pen. Hold Space while Z/R is held and confirm pan takes priority, without painting unintended marks.
+5. **Trackpad:** Test two-finger scrolling and pinch-to-zoom on the MacBook Air trackpad and compatible Windows/Linux hardware. Confirm cursor-focused zoom when supported, no spurious brush strokes, and that pinching does not cause jumps.
+6. **Input regression:** On Windows test Cintiq pen pressure and repeated right-click context menus; on Linux test Intuos pressure and pan; on macOS test Apple Pencil/Sidecar pressure, screen mapping, and keyboard + pen gestures.
+7. **Data safety:** Open and save an existing `.las` v6 project, rotate the view and export PNG/sequence/MP4, and confirm nothing is physically rotated. Undo/Redo, onion skins, motion objects, linked cels, audio, and Fill edge-aware functionality remain correct.
+8. **Packaging/tests:** Run `python -m unittest discover -s tests -v` with each OS virtualenv, then `tools/build.py` and `tools/package_release.py`; confirm generated names all say 0.37.0. macOS Gatekeeper may require **System Settings → Privacy & Security → Open Anyway** for this unsigned build if you trust it.
+
+**Important:** Keyboard Z and R are initially fixed for their temporary hold behavior. More advanced remapping can be integrated with the broader keyboard-shortcut preferences in a follow-up. Gesture delivery depends on Qt/platform support, and native hardware tests are required to validate it. Rotating a large canvas may be slower than an upright canvas on older hardware.
+
+---
+
 # Linux Animation Studio v0.36.2: Edge-Aware Paint Bucket & Controls
 
 ## v0.36.2 changes

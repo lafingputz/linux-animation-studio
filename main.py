@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.36.2: Edge-aware Paint Bucket and expanded controls."""
+"""Linux Animation Studio v0.37.0: Canvas navigation and trackpad gestures."""
 import io
 import wave
 import time
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region, expand_region, edge_aware_expand_region
 
-APP_VERSION = "0.36.2"
+APP_VERSION = "0.37.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -251,7 +251,8 @@ class Canvas(QWidget):
         self.eraser = False
         self.eraser_size = 48
         self.zoom = 1.0
-        self.tool = 'brush'  # brush, eraser, fill, select, transform, pan
+        self.rotation = 0.0  # View-only degrees; never written to project frames.
+        self.tool = 'brush'  # brush, eraser, fill, select, transform, pan, zoom, rotate
         self.fill_tolerance = 24
         self.fill_expansion = 2
         self.fill_edge_aware = True
@@ -306,10 +307,41 @@ class Canvas(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
         self._enforce_cursor()
 
+    def _update_view_size(self):
+        """Allocate the axis-aligned bounds of the rotated canvas, not its pixels."""
+        radians = math.radians(self.rotation)
+        c, sn = abs(math.cos(radians)), abs(math.sin(radians))
+        width = math.ceil(self.zoom * (self.width_px * c + self.height_px * sn)) + 4
+        height = math.ceil(self.zoom * (self.width_px * sn + self.height_px * c)) + 4
+        self.setFixedSize(width, height)
+        self.update()
+
+    def view_transform(self):
+        """Document coordinates -> widget coordinates; shared by paint & pointer input."""
+        result = QTransform()
+        result.translate(self.width() / 2.0, self.height() / 2.0)
+        result.rotate(self.rotation)
+        result.scale(self.zoom, self.zoom)
+        result.translate(-self.width_px / 2.0, -self.height_px / 2.0)
+        return result
+
+    def widget_to_document(self, point):
+        transform, ok = self.view_transform().inverted()
+        return transform.map(QPointF(point)) if ok else QPointF(point)
+
+    def document_to_widget(self, point):
+        return self.view_transform().map(QPointF(point))
+
+    def set_rotation(self, degrees):
+        # Rotate only the viewport, not cels, history, thumbnails, or exports.
+        self.rotation = (float(degrees) + 180.0) % 360.0 - 180.0
+        if abs(self.rotation) < 1e-6:
+            self.rotation = 0.0
+        self._update_view_size()
+
     def set_zoom(self, zoom):
         self.zoom = max(0.25, min(8.0, float(zoom)))
-        self.setFixedSize(round(self.width_px * self.zoom), round(self.height_px * self.zoom))
-        self.update()
+        self._update_view_size()
 
     def _enforce_cursor(self):
         # Transform uses the standard OS arrow; other tools draw canvas overlays.
@@ -320,7 +352,9 @@ class Canvas(QWidget):
                 self._bucket_cursor = bucket_cursor()
             self.setCursor(self._bucket_cursor)
         else:
-            shape = (Qt.CursorShape.ArrowCursor if self.tool == "transform"
+            shape = (Qt.CursorShape.SizeAllCursor if self.tool == 'rotate'
+                     else Qt.CursorShape.SizeHorCursor if self.tool == 'zoom'
+                     else Qt.CursorShape.ArrowCursor if self.tool == "transform"
                      else Qt.CursorShape.BlankCursor)
             self.setCursor(shape)
 
@@ -467,7 +501,8 @@ class Canvas(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.scale(self.zoom, self.zoom)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.setTransform(self.view_transform())
         p.fillRect(QRect(0, 0, self.width_px, self.height_px), Qt.GlobalColor.white)
         for layer in self.layers:
             if layer.visible:
@@ -504,7 +539,7 @@ class Canvas(QWidget):
                 ghost.end()
                 p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
                 p.setOpacity(1.0)
-                p.fillRect(self.rect(), Qt.GlobalColor.white)
+                p.fillRect(QRect(0, 0, self.width_px, self.height_px), Qt.GlobalColor.white)
                 p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
                 for drawn_layer in self.layers:
                     if drawn_layer.visible:
@@ -1674,30 +1709,30 @@ class Canvas(QWidget):
             event.accept()
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason) if typ == QEvent.Type.TabletPress else None
-        self.show_hover(event.position() / self.zoom, pressure if self.drawing else 1.0)
+        self.show_hover(self.widget_to_document(event.position()), pressure if self.drawing else 1.0)
         if self.playing:
             event.accept()
             return
         if typ == QEvent.Type.TabletPress:
             self.ignore_mouse = True
             if self.tool == 'fill':
-                self.flood_fill(event.position() / self.zoom)
+                self.flood_fill(self.widget_to_document(event.position()))
             elif self.tool in ("brush", "eraser"):
                 self._begin_stroke('tablet')
-                self.stroke(event.position() / self.zoom, pressure, True)
+                self.stroke(self.widget_to_document(event.position()), pressure, True)
             else:
-                self._start_interaction(event.position() / self.zoom)
+                self._start_interaction(self.widget_to_document(event.position()))
         elif typ == QEvent.Type.TabletMove:
             if self.drawing and self.input_kind == 'tablet' and buttons & Qt.MouseButton.LeftButton:
-                self.stroke(event.position() / self.zoom, pressure, True)
+                self.stroke(self.widget_to_document(event.position()), pressure, True)
             elif (self.drag_origin is not None or self.transform_drag is not None) and buttons & Qt.MouseButton.LeftButton:
-                self._update_interaction(event.position() / self.zoom)
+                self._update_interaction(self.widget_to_document(event.position()))
         elif typ == QEvent.Type.TabletRelease:
             if self.drawing and self.input_kind == 'tablet':
-                self.stroke(event.position() / self.zoom, pressure, True)
+                self.stroke(self.widget_to_document(event.position()), pressure, True)
                 self._end_stroke()
             if self.drag_origin is not None or self.transform_drag is not None:
-                self._finish_interaction(event.position() / self.zoom)
+                self._finish_interaction(self.widget_to_document(event.position()))
             self.ignore_mouse = False
         self.diagnostic.emit(f'TABLET: {name} | pressure: {pressure:.3f} | tilt: '
                              f'{event.xTilt():.0f}, {event.yTilt():.0f} | {typ.name}')
@@ -1723,28 +1758,28 @@ class Canvas(QWidget):
         if self.playing:
             event.accept()
             return
-        self.show_hover(event.position() / self.zoom, 1.0)
+        self.show_hover(self.widget_to_document(event.position()), 1.0)
         if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
                 and not (event.buttons() & Qt.MouseButton.RightButton)):
             if self.tool == 'fill':
-                self.flood_fill(event.position() / self.zoom)
+                self.flood_fill(self.widget_to_document(event.position()))
             elif self.tool in ('brush', 'eraser'):
                 self._begin_stroke('mouse')
-                self.stroke(event.position() / self.zoom, 1.0, False)
+                self.stroke(self.widget_to_document(event.position()), 1.0, False)
             else:
-                self._start_interaction(event.position() / self.zoom)
+                self._start_interaction(self.widget_to_document(event.position()))
             self.diagnostic.emit('MOUSE input (fixed width; no pressure)')
         event.accept()
 
     def mouseMoveEvent(self, event):
         if not self.ignore_mouse:
-            self.show_hover(event.position() / self.zoom, 1.0)
+            self.show_hover(self.widget_to_document(event.position()), 1.0)
         if (not self.ignore_mouse and self.drawing and self.input_kind == 'mouse'
                 and event.buttons() & Qt.MouseButton.LeftButton
                 and not event.buttons() & Qt.MouseButton.RightButton):
-            self.stroke(event.position() / self.zoom, 1.0, False)
+            self.stroke(self.widget_to_document(event.position()), 1.0, False)
         elif (self.drag_origin is not None or self.transform_drag is not None) and event.buttons() & Qt.MouseButton.LeftButton:
-            self._update_interaction(event.position() / self.zoom)
+            self._update_interaction(self.widget_to_document(event.position()))
         event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -1752,7 +1787,7 @@ class Canvas(QWidget):
             if self.input_kind == 'mouse':
                 self._end_stroke()
             if self.drag_origin is not None or self.transform_drag is not None:
-                self._finish_interaction(event.position() / self.zoom)
+                self._finish_interaction(self.widget_to_document(event.position()))
         event.accept()
 
     def _copy_layers(self, layers, duplicate=True):
@@ -2082,6 +2117,7 @@ class Canvas(QWidget):
         self.lasso_points = []
         self.lasso_preview = None
         self.width_px, self.height_px = width, height
+        self.rotation = 0.0
         self.layers = [Layer(uuid.uuid4().hex, 'Layer 1', transparent_image(width, height))]
         self.frames = [self.layers]
         self.motion_objects = []
@@ -2100,7 +2136,7 @@ class Canvas(QWidget):
         self.audio_suffix = ''
         self._undo.clear()
         self._redo.clear()
-        self.setFixedSize(round(width * self.zoom), round(height * self.zoom))
+        self._update_view_size()
         self.dirty = False
         self.history_changed.emit(False, False)
         self.dirty_changed.emit()
@@ -2278,6 +2314,7 @@ class Canvas(QWidget):
         stored_color = QColor(str(info.get('brush_color', '#000000')))
         self.color = stored_color if stored_color.isValid() else QColor('#000000')
         self.width_px, self.height_px = width, height
+        self.rotation = 0.0
         self._thumbnail_cache.clear()
         self.frames = frames
         self.motion_objects = motion_objects
@@ -2297,7 +2334,7 @@ class Canvas(QWidget):
         self.audio_suffix = embedded_suffix
         self.layers = frames[index]
         self.active_id = active_id
-        self.setFixedSize(round(width * self.zoom), round(height * self.zoom))
+        self._update_view_size()
         self._undo.clear()
         self._redo.clear()
         self.history_changed.emit(False, False)
@@ -2324,17 +2361,30 @@ class PannableScrollArea(QScrollArea):
         self._pan_device = None
         self._last_global = QPointF()
         self._space_down = False
+        self._nav_held = []   # Key press ordering; Space always has priority.
+        self._nav_dragged = set()
+        self._view_drag = None
+        self._view_drag_device = None
+        self._view_drag_source = None
+        self._view_drag_last_global = QPointF()
+        self._view_drag_start_global = QPointF()
+        self._view_drag_start_angle = 0.0
+        self.on_tool_tap = None
+        self.on_canvas_rotate = None
         self._canvas = None
         self._pan_debug = os.environ.get('LAS_PAN_DEBUG', '').lower() in ('1', 'true', 'yes')
         self._pan_samples = 0
         self.on_canvas_zoom = None
         self.viewport().installEventFilter(self)
+        # Qt pinch on touch-capable trackpads; macOS may instead emit NativeGesture.
+        self.viewport().grabGesture(Qt.GestureType.PinchGesture)
         QApplication.instance().installEventFilter(self)
 
     def setWidget(self, widget):
         super().setWidget(widget)
         self._canvas = widget
         widget.installEventFilter(self)
+        widget.grabGesture(Qt.GestureType.PinchGesture)
         self._update_mode()
 
     def _log_pan(self, message):
@@ -2345,15 +2395,31 @@ class PannableScrollArea(QScrollArea):
         return self._canvas is not None and self._canvas.tool == 'pan'
 
     def _pan_enabled(self):
-        return self._space_down or self._is_pan_tool()
+        return self._space_down or (not self._nav_held and self._is_pan_tool())
+
+    def _active_navigation(self):
+        if self._space_down:
+            return 'pan'
+        if self._nav_held:
+            return self._nav_held[-1]
+        if self._canvas is not None and self._canvas.tool in ('pan', 'zoom', 'rotate'):
+            return self._canvas.tool
+        return None
+
+    def _is_typing(self):
+        focus = QApplication.focusWidget()
+        return isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)) or (isinstance(focus, QComboBox) and focus.isEditable())
 
     def _set_cursor(self):
+        mode = self._active_navigation()
         cursor = (Qt.CursorShape.ClosedHandCursor if self._pan_state == 'dragging'
-                  else Qt.CursorShape.OpenHandCursor if self._pan_enabled()
+                  else Qt.CursorShape.OpenHandCursor if mode == 'pan'
+                  else Qt.CursorShape.SizeHorCursor if mode == 'zoom'
+                  else Qt.CursorShape.SizeAllCursor if mode == 'rotate'
                   else Qt.CursorShape.ArrowCursor)
         self.viewport().setCursor(cursor)
         if self._canvas is not None:
-            if self._pan_enabled():
+            if mode:
                 self._canvas.setCursor(cursor)
             else:
                 self._canvas.refresh_cursor()
@@ -2364,6 +2430,8 @@ class PannableScrollArea(QScrollArea):
         self._set_cursor()
 
     def tool_changed(self):
+        if self._view_drag is not None:
+            self._view_drag = None
         if self._pan_state == 'dragging' and not self._space_down:
             self._stop_pan('tool_changed')
         self._update_mode()
@@ -2405,8 +2473,90 @@ class PannableScrollArea(QScrollArea):
                           '->' + str((h.value(), v.value())) +
                           ' limits=' + str((h.maximum(), v.maximum())))
 
+    def zoom_at(self, factor, global_point):
+        """Zoom about a document anchor even when the widget is centered/rotated."""
+        if self._canvas is None or not math.isfinite(factor) or factor <= 0:
+            return
+        previous = self._canvas.zoom
+        target = max(0.25, min(8.0, previous * factor))
+        if abs(target - previous) < 1e-9:
+            return
+        point = self.viewport().mapFromGlobal(QPointF(global_point).toPoint())
+        old_widget = QPointF(point) - QPointF(self._canvas.pos())
+        document_point = self._canvas.widget_to_document(old_widget)
+        self._canvas.set_zoom(target)
+        self._restore_anchor(document_point, point)
+        if self.on_canvas_zoom is not None:
+            self.on_canvas_zoom(target)
+
+    def rotate_at(self, angle, global_point):
+        """Rotate the view only; reanchor the document pixel under the pointer."""
+        if self._canvas is None or not math.isfinite(angle):
+            return
+        point = self.viewport().mapFromGlobal(QPointF(global_point).toPoint())
+        document_point = self._canvas.widget_to_document(QPointF(point) - QPointF(self._canvas.pos()))
+        self._canvas.set_rotation(angle)
+        self._restore_anchor(document_point, point)
+        if self.on_canvas_rotate is not None:
+            self.on_canvas_rotate(self._canvas.rotation)
+
+    def _restore_anchor(self, document_point, viewport_point):
+        # A queued adjustment runs after QScrollArea has relaid-out the widget.
+        canvas = self._canvas
+        def adjust():
+            if self._canvas is not canvas:
+                return
+            widget_point = canvas.document_to_widget(document_point)
+            projected = QPointF(canvas.pos()) + widget_point
+            offset = projected - QPointF(viewport_point)
+            h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+            h.setValue(h.value() + round(offset.x()))
+            v.setValue(v.value() + round(offset.y()))
+        QTimer.singleShot(0, adjust)
+
+    def _start_view_drag(self, event, source, mode):
+        self._view_drag = mode
+        self._view_drag_source = source
+        self._view_drag_device = event.pointingDevice() if source == 'tablet' else None
+        self._view_drag_last_global = QPointF(event.globalPosition())
+        self._view_drag_start_global = QPointF(event.globalPosition())
+        self._view_drag_start_angle = self._canvas.rotation
+        self._set_cursor()
+
+    def _end_view_drag(self):
+        self._view_drag = None
+        self._view_drag_source = None
+        self._view_drag_device = None
+        self._set_cursor()
+
+    def _continue_view_drag(self, event):
+        current = QPointF(event.globalPosition())
+        dx = current.x() - self._view_drag_last_global.x()
+        self._view_drag_last_global = current
+        if abs(dx) < 0.01:
+            return
+        for key in self._nav_held:
+            self._nav_dragged.add(key)
+        if self._view_drag == 'zoom':
+            self.zoom_at(math.exp(dx * 0.012), self._view_drag_start_global)
+        elif self._view_drag == 'rotate':
+            # 0.45 degrees per screen pixel, independent of document zoom.
+            self.rotate_at(self._canvas.rotation + dx * 0.45, self._view_drag_start_global)
+
+    def _pinch_event(self, event):
+        pinch = event.gesture(Qt.GestureType.PinchGesture)
+        if pinch is None or self._canvas is None:
+            return False
+        if pinch.state() == Qt.GestureState.GestureUpdated:
+            previous = float(pinch.lastScaleFactor())
+            scale = float(pinch.scaleFactor())
+            if previous > 0 and scale > 0:
+                self.zoom_at(scale / previous, event.globalPos() if hasattr(event, 'globalPos') else self.viewport().mapToGlobal(self.viewport().rect().center()))
+        event.accept()
+        return True
+
     def _wheel_zoom(self, event):
-        """Zoom about the pointer; preserve the same canvas pixel under it."""
+        """Ctrl/Alt + wheel or trackpad pinch emulation, centered on pointer."""
         if self._canvas is None or not (event.modifiers() & (
                 Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
             return False
@@ -2415,52 +2565,66 @@ class PannableScrollArea(QScrollArea):
             steps = event.pixelDelta().y() / 100.0
         if not steps:
             return False
-        before = self._canvas.zoom
-        target = max(0.25, min(8.0, before * (1.15 ** steps)))
-        if abs(target - before) < 1e-9:
-            event.accept()
-            return True
-        global_point = event.globalPosition().toPoint()
-        pointer = self.viewport().mapFromGlobal(global_point)
-        # The canvas is centered when smaller than the viewport, so use the
-        # actual widget origin instead of assuming it starts at (0, 0).
-        canvas_point = (QPointF(pointer) - QPointF(self._canvas.pos())) / before
-        self._canvas.set_zoom(target)
-        def preserve_anchor():
-            if self._canvas is None or abs(self._canvas.zoom - target) > 1e-6:
-                return
-            # Adjust scrollbars for the shift caused by resizing the canvas.
-            image_point = QPoint(round(canvas_point.x() * target),
-                                 round(canvas_point.y() * target))
-            projected = self._canvas.mapTo(self.viewport(), image_point)
-            offset = projected - pointer
-            h, v = self.horizontalScrollBar(), self.verticalScrollBar()
-            h.setValue(h.value() + offset.x())
-            v.setValue(v.value() + offset.y())
-        QTimer.singleShot(0, preserve_anchor)
-        if self.on_canvas_zoom is not None:
-            self.on_canvas_zoom(target)
+        self.zoom_at(1.15 ** steps, event.globalPosition())
         event.accept()
         return True
 
     def eventFilter(self, obj, event):
         t = event.type()
-        if t == QEvent.Type.Wheel and (obj is self._canvas or obj is self.viewport()):
+        on_canvas = obj is self._canvas or obj is self.viewport()
+        if t == QEvent.Type.Wheel and on_canvas:
             if self._wheel_zoom(event):
                 return True
-        if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease) and event.key() == Qt.Key.Key_Space:
-            if self.window().isActiveWindow():
-                if not event.isAutoRepeat():
-                    self._space_down = t == QEvent.Type.KeyPress
-                    if t == QEvent.Type.KeyRelease and self._pan_state == 'dragging' and not self._is_pan_tool():
-                        self._stop_pan('space_released')
-                    self._update_mode()
-                return True  # Prevent QPushButton focus from reactivating.
+            return False  # Allow QScrollArea native two-finger scrolling / pan.
+        if t == QEvent.Type.Gesture and on_canvas:
+            return self._pinch_event(event)
+        if t == QEvent.Type.NativeGesture and on_canvas and self._canvas is not None:
+            if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom_at(math.exp(float(event.value())), event.globalPosition())
+                event.accept()
+                return True
             return False
+
+        if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            key = event.key()
+            mode = ('pan' if key == Qt.Key.Key_Space else
+                    'zoom' if key == Qt.Key.Key_Z else
+                    'rotate' if key == Qt.Key.Key_R else None)
+            if mode is None or not self.window().isActiveWindow():
+                return False
+            if self._is_typing() or not self._canvas or not self._canvas.isVisible():
+                return False
+            if event.isAutoRepeat():
+                return True
+            pressed = t == QEvent.Type.KeyPress
+            if mode == 'pan':
+                self._space_down = pressed
+                if not pressed and self._pan_state == 'dragging' and not self._is_pan_tool():
+                    self._stop_pan('space_released')
+            else:
+                if pressed:
+                    if mode not in self._nav_held:
+                        self._nav_held.append(mode)
+                    self._nav_dragged.discard(mode)
+                else:
+                    was_held = mode in self._nav_held
+                    self._nav_held = [m for m in self._nav_held if m != mode]
+                    used_for_drag = mode in self._nav_dragged
+                    self._nav_dragged.discard(mode)
+                    if self._view_drag == mode:
+                        self._end_view_drag()
+                    if was_held and not used_for_drag and self.on_tool_tap is not None:
+                        self.on_tool_tap(mode)  # Tap Z/R selects a persistent tool.
+            self._update_mode()
+            event.accept()
+            return True
 
         if t in (QEvent.Type.ApplicationDeactivate, QEvent.Type.WindowDeactivate):
             if t == QEvent.Type.ApplicationDeactivate or obj is self.window():
                 self._space_down = False
+                self._nav_held.clear()
+                self._nav_dragged.clear()
+                self._end_view_drag()
                 self._stop_pan('window_deactivated')
                 self._update_mode()
             return False
@@ -2471,59 +2635,81 @@ class PannableScrollArea(QScrollArea):
         mouse_press = t == QEvent.Type.MouseButtonPress
         mouse_move = t == QEvent.Type.MouseMove
         mouse_release = t == QEvent.Type.MouseButtonRelease
-        if not (tablet_press or tablet_move or tablet_release or mouse_press or mouse_move or mouse_release):
+        if not any((tablet_press, tablet_move, tablet_release, mouse_press, mouse_move, mouse_release)):
             return False
-
-        # This is an application-wide filter, so never consume events from other windows.
         if isinstance(obj, QWidget) and obj.window() is not self.window():
             return False
-        on_canvas = obj is self._canvas or obj is self.viewport()
-        if self._pan_state != 'dragging':
-            if not on_canvas:
-                return False
-            is_middle = mouse_press and event.button() == Qt.MouseButton.MiddleButton
-            is_left = mouse_press and event.button() == Qt.MouseButton.LeftButton
-            if (tablet_press and self._pan_enabled()) or is_middle or (is_left and self._pan_enabled()):
-                self._start_pan(event, 'tablet' if tablet_press else 'mouse')
-                event.accept()
-                return True
-            return False
 
-        # Once a tablet drag owns navigation, Qt's synthesized mouse input
-        # must not replace its position or end the gesture.
-        if self._pan_source == 'tablet':
-            if mouse_press or mouse_move or mouse_release:
-                event.accept()
-                return True
-            if event.pointingDevice() != self._pan_device:
-                return False
-            if tablet_move:
-                self._continue_pan(event)
-                event.accept()
-                return True
-            if tablet_release:
-                self._stop_pan('tablet_release')
-                event.accept()
-                return True
-            if tablet_press:
-                self._log_pan('DUPLICATE tablet_press ignored')
-                event.accept()
-                return True
-        else:
-            if tablet_press:
-                # On Wayland a tablet press can arrive after a synthesized
-                # mouse press. Promote ownership to the actual tablet.
-                self._start_pan(event, 'tablet')
-                event.accept()
-                return True
-            if tablet_move or tablet_release:
-                return False
-            if mouse_move:
-                self._continue_pan(event)
-                event.accept()
-                return True
-            if mouse_release:
-                self._stop_pan('mouse_release')
+        if self._view_drag is not None:
+            if self._view_drag_source == 'tablet':
+                if mouse_press or mouse_move or mouse_release:
+                    event.accept()
+                    return True
+                if event.pointingDevice() != self._view_drag_device:
+                    return False
+                if tablet_move:
+                    self._continue_view_drag(event)
+                elif tablet_release:
+                    start = QPointF(self._view_drag_start_global)
+                    moved = abs(QPointF(event.globalPosition()).x() - start.x()) >= 3
+                    mode = self._view_drag
+                    self._end_view_drag()
+                    if mode == 'zoom' and not moved and not self._nav_held:
+                        self.zoom_at(0.8 if event.modifiers() & Qt.KeyboardModifier.AltModifier else 1.25, start)
+            else:
+                if tablet_press:
+                    # Some Wayland compositors synthesize a mouse press first.
+                    self._start_view_drag(event, 'tablet', self._view_drag)
+                elif mouse_move:
+                    self._continue_view_drag(event)
+                elif mouse_release:
+                    start = QPointF(self._view_drag_start_global)
+                    dragged = abs(QPointF(event.globalPosition()).x() - start.x()) >= 3
+                    mode = self._view_drag
+                    self._end_view_drag()
+                    if mode == 'zoom' and not dragged and not self._nav_held:
+                        self.zoom_at(0.8 if event.modifiers() & Qt.KeyboardModifier.AltModifier else 1.25, start)
+            event.accept()
+            return True
+
+        if self._pan_state == 'dragging':
+            if self._pan_source == 'tablet':
+                if mouse_press or mouse_move or mouse_release:
+                    event.accept()
+                    return True
+                if event.pointingDevice() != self._pan_device:
+                    return False
+                if tablet_move:
+                    self._continue_pan(event)
+                elif tablet_release:
+                    self._stop_pan('tablet_release')
+            else:
+                if tablet_press:
+                    self._start_pan(event, 'tablet')
+                elif mouse_move:
+                    self._continue_pan(event)
+                elif mouse_release:
+                    self._stop_pan('mouse_release')
+            event.accept()
+            return True
+
+        if not on_canvas:
+            return False
+        left_press = mouse_press and event.button() == Qt.MouseButton.LeftButton
+        # Some Wayland tablet drivers expose a nib TabletPress without a
+        # corresponding LeftButton field. Treat NoButton as primary only for
+        # navigation press events, never RightButton side-button presses.
+        tablet_primary = tablet_press and event.button() in (
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+        middle_press = mouse_press and event.button() == Qt.MouseButton.MiddleButton
+        if middle_press or ((tablet_primary or left_press) and self._active_navigation() == 'pan'):
+            self._start_pan(event, 'tablet' if tablet_primary else 'mouse')
+            event.accept()
+            return True
+        if tablet_primary or left_press:
+            mode = self._active_navigation()
+            if mode in ('zoom', 'rotate'):
+                self._start_view_drag(event, 'tablet' if tablet_primary else 'mouse', mode)
                 event.accept()
                 return True
         return False
@@ -3239,7 +3425,9 @@ class MainWindow(QMainWindow):
             ('fill', '🪣', 'Paint Bucket: click to fill an enclosed area (G)'),
             ('select', '▱', 'Selection: arrow for rectangle / lassos'),
             ('transform', '➤', 'Transform / move selection or active cel'),
-            ('pan', '✋', 'Pan canvas')]:
+            ('pan', '✋', 'Pan canvas'),
+            ('zoom', '⌕', 'Zoom: click in, Alt+click out; hold Z and drag horizontally'),
+            ('rotate', '⟳', 'Rotate view: hold R and drag; artwork stays upright in exports')]:
             b = QToolButton()
             b.setText(label)
             b.setToolTip(hint)
@@ -3426,6 +3614,8 @@ class MainWindow(QMainWindow):
         self.canvas_scroll = scroll
         scroll.setWidget(self.canvas)
         scroll.on_canvas_zoom = lambda zoom: self.status.setText(f'Canvas zoom: {zoom * 100:.0f}%')
+        scroll.on_canvas_rotate = lambda angle: self.status.setText(f'Canvas rotation: {angle:.1f}°')
+        scroll.on_tool_tap = self._tool_shortcut
         scroll.setWidgetResizable(False)
         scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         scroll.viewport().setCursor(Qt.CursorShape.ArrowCursor)
@@ -3781,6 +3971,8 @@ class MainWindow(QMainWindow):
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
         self._build_animation_menu()
         viewmenu = self.menuBar().addMenu('&View')
+        viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
+        viewmenu.addSeparator()
         viewmenu.addAction('Reset Workspace Layout', self.reset_workspace_layout)
         for name, dock in self._docks.items():
             viewmenu.addAction(dock.toggleViewAction())
@@ -4336,6 +4528,12 @@ class MainWindow(QMainWindow):
                 button.setToolTip(f'Eraser: {self.canvas.eraser_size} px (E)')
             elif tool == 'fill':
                 button.setToolTip('Paint Bucket: fill with selected color (G)')
+            elif tool == 'zoom':
+                button.setToolTip('Zoom: click in, Alt+click out; hold Z+drag right/left')
+            elif tool == 'rotate':
+                button.setToolTip('Rotate canvas view: hold R and drag; View → Reset Canvas Rotation')
+            elif tool == 'pan':
+                button.setToolTip('Pan: hold Space and drag')
             else:
                 button.setToolTip(f'Selection: {self.selection_mode_picker.currentText()} (M / L / Shift+L)')
 
@@ -5329,6 +5527,13 @@ class MainWindow(QMainWindow):
             f'QPushButton {{ color: {color.name()}; font-size: 27px; '
             'border: 1px solid #888888; border-radius: 18px; padding: 0px; }')
 
+    def reset_canvas_rotation(self):
+        if not self.project_active:
+            return
+        point = self.canvas_scroll.viewport().mapToGlobal(self.canvas_scroll.viewport().rect().center())
+        self.canvas_scroll.rotate_at(0.0, point)
+        self.return_canvas_focus()
+
     def adjust_zoom(self, factor):
         if not self.project_active:
             return
@@ -5341,8 +5546,11 @@ class MainWindow(QMainWindow):
         area = self.canvas_scroll.viewport().size()
         if area.width() <= 0 or area.height() <= 0:
             return
-        factor = min((area.width() - 24) / self.canvas.width_px,
-                     (area.height() - 24) / self.canvas.height_px)
+        radians = math.radians(self.canvas.rotation)
+        width = abs(self.canvas.width_px * math.cos(radians)) + abs(self.canvas.height_px * math.sin(radians))
+        height = abs(self.canvas.width_px * math.sin(radians)) + abs(self.canvas.height_px * math.cos(radians))
+        factor = min((area.width() - 24) / width,
+                     (area.height() - 24) / height)
         self.canvas.set_zoom(max(0.25, min(8.0, factor)))
         self.canvas_scroll.horizontalScrollBar().setValue(0)
         self.canvas_scroll.verticalScrollBar().setValue(0)
