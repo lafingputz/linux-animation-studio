@@ -1,8 +1,11 @@
-# Linux Animation Studio v0.37.2: Reset Canvas Rotation Shortcut
+# Linux Animation Studio v0.37.3: Visual Shortcut Conflict Detection
 
 **Test candidate, not an official release.** This update retains the Linux Animation Studio name, SpynFrame icon trial, and `.las` project format v6. Installers remain unsigned/unnotarized on macOS.
 
-## New in v0.37.2
+## New in v0.37.3
+
+**Keyboard Shortcuts usability:** Conflicting shortcuts now highlight both commands in red as soon as the editor sees a duplicate; an inline warning identifies affected commands, with a tooltip on each field. Saving while conflicts remain scrolls to and focuses the first offending field. Saving is blocked until the duplicate assignments are resolved, while Restore Defaults clears duplicate warnings. All existing saved navigation bindings remain compatible.
+
 
 - **Reset rotation shortcut:** Ctrl+R (Windows/Linux) or Command+R (macOS) resets the canvas view to 0°.
 - **Customizable:** Edit the reset shortcut in Edit → Keyboard Shortcuts; the View menu displays the current binding.
@@ -295,6 +298,6 @@ Source compiles and the non-GUI suite is run in this environment. PySide6 is not
 - Rerun multi-frame fill opt-in tests and complete cross-platform draw/animation, save/load, and packaging regressions.
 - Leave issue #2 open until the corrective release passes; reference/all-visible layer fills will be a future enhancement.
 
-### v0.37.2: Customizable navigation keys
+### v0.37.3: Customizable navigation keys
 
 Under **Edit → Keyboard Shortcuts…**, change **Temporary / Tap Rotate Tool** (default R), **Temporary / Tap Zoom Tool** (default Z), and **Temporary Pan** (default Space). Tap/hold behavior follows the assigned combination; changing the key removes the old binding. The existing configurable **Reset Canvas Rotation** action defaults to Ctrl+R (Command+R on macOS). Navigation bindings must be a single key combination, are checked for duplicates, and persist between launches. Native file-menu shortcuts remain reserved.

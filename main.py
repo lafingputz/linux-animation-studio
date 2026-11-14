@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.37.2: customizable canvas navigation shortcuts."""
+"""Linux Animation Studio v0.37.3: customizable canvas navigation shortcuts."""
 import io
 import wave
 import time
@@ -29,8 +29,9 @@ from PySide6.QtWidgets import (
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region, expand_region, edge_aware_expand_region
+from shortcut_conflicts import find_shortcut_conflicts
 
-APP_VERSION = "0.37.2"
+APP_VERSION = "0.37.3"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -4984,40 +4985,92 @@ class MainWindow(QMainWindow):
         self._reset_rotation_action.setText(label + (f'   ({shortcut})' if shortcut else ''))
 
     def show_shortcut_preferences(self):
+        from PySide6.QtWidgets import QKeySequenceEdit
+
         dialog = QDialog(self)
         dialog.setWindowTitle('Keyboard Shortcuts')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('Enter Qt shortcuts (e.g. Ctrl+Shift+R). Rotate, Zoom and Temporary Pan support tap/hold and can be reassigned. Navigation keys do not act while typing.'))
+        layout.addWidget(QLabel(
+            'Enter Qt shortcuts (e.g. Ctrl+Shift+R). Rotate, Zoom and Temporary Pan '
+            'support tap/hold and can be reassigned. Navigation keys do not act while typing.'))
         form = QFormLayout()
-        from PySide6.QtWidgets import QKeySequenceEdit
         editors = {}
+        labels = {}
         for name, default, _ in self._shortcut_defs:
             edit = QKeySequenceEdit(self._shortcut_objects[name].key())
-            form.addRow(name, edit)
+            label = QLabel(name)
+            form.addRow(label, edit)
             editors[name] = edit
+            labels[name] = label
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
-        inner = QWidget(); inner.setLayout(form)
+        inner = QWidget()
+        inner.setLayout(form)
         form_scroll.setWidget(inner)
         layout.addWidget(form_scroll)
+        conflict_status = QLabel('')
+        conflict_status.setWordWrap(True)
+        conflict_status.setAccessibleName('Shortcut conflict details')
+        layout.addWidget(conflict_status)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.RestoreDefaults)
         layout.addWidget(buttons)
         buttons.rejected.connect(dialog.reject)
+
+        def current_sequences():
+            return {name: edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                    for name, edit in editors.items()}
+
+        def update_conflicts():
+            sequences = current_sequences()
+            conflicts = find_shortcut_conflicts(sequences)
+            for name, edit in editors.items():
+                peers = conflicts.get(name)
+                if peers:
+                    edit.setStyleSheet('QKeySequenceEdit { border: 2px solid #d64545; '
+                                       'border-radius: 4px; background-color: #fff0f0; '
+                                       'color: #272727; }')
+                    edit.setToolTip('Conflicts with: ' + ', '.join(peers))
+                    edit.setAccessibleDescription('Shortcut conflicts with ' + ', '.join(peers))
+                    labels[name].setStyleSheet('color: #d64545; font-weight: bold;')
+                else:
+                    edit.setStyleSheet('')
+                    edit.setToolTip('')
+                    edit.setAccessibleDescription('')
+                    labels[name].setStyleSheet('')
+            if conflicts:
+                details = '; '.join(f'{name} ↔ {", ".join(peers)}'
+                                    for name, peers in conflicts.items()
+                                    if list(sequences).index(name) < min(list(sequences).index(peer) for peer in peers))
+                conflict_status.setText('⚠ Duplicate shortcuts: ' + (details or
+                    '; '.join(f'{name} ↔ {", ".join(peers)}' for name, peers in conflicts.items())))
+                conflict_status.setStyleSheet('color: #d64545; font-weight: bold;')
+            else:
+                conflict_status.setText('No duplicate shortcuts detected.')
+                conflict_status.setStyleSheet('')
+            return conflicts
+
+        for edit in editors.values():
+            edit.keySequenceChanged.connect(lambda _seq: update_conflicts())
+
         def restore():
             for name, default, _ in self._shortcut_defs:
                 editors[name].setKeySequence(QKeySequence(default))
+            update_conflicts()
         buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(restore)
+
         def save():
-            sequences = {name: edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText) for name, edit in editors.items()}
-            used = {}
-            for name, sequence in sequences.items():
-                if not sequence:
-                    continue
-                key = sequence.lower()
-                if key in used:
-                    QMessageBox.warning(dialog, 'Shortcut conflict', f'{name} conflicts with {used[key]}.')
-                    return
-                used[key] = name
+            sequences = current_sequences()
+            conflicts = update_conflicts()
+            if conflicts:
+                # Make both fields visible as red immediately, and take the
+                # user directly to the first offending assignment on Save.
+                first = next(name for name in editors if name in conflicts)
+                form_scroll.ensureWidgetVisible(editors[first])
+                editors[first].setFocus()
+                QMessageBox.warning(dialog, 'Shortcut conflict',
+                    f'{first} conflicts with {", ".join(conflicts[first])}. '
+                    'The conflicting assignments are highlighted in red.')
+                return
             # Navigation shortcuts require a single key combination, since both
             # key-down and key-up are needed for temporary tool behavior.
             for name in self._navigation_shortcut_names:
@@ -5025,12 +5078,14 @@ class MainWindow(QMainWindow):
                 if sequence.count() != 1:
                     QMessageBox.warning(dialog, 'Navigation shortcut',
                                         f'{name} must use exactly one key combination.')
+                    form_scroll.ensureWidgetVisible(editors[name])
                     return
                 combo = sequence[0]
                 if combo.key() in (Qt.Key.Key_unknown, Qt.Key.Key_Control,
                                    Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta):
                     QMessageBox.warning(dialog, 'Navigation shortcut',
                                         f'{name} must use a non-modifier key.')
+                    form_scroll.ensureWidgetVisible(editors[name])
                     return
             # Keys that are part of native menu accelerators must remain available.
             # File-menu shortcuts remain reserved until unified action routing.
@@ -5044,8 +5099,10 @@ class MainWindow(QMainWindow):
             self._update_reset_rotation_shortcut_hint()
             self._update_navigation_shortcuts()
             dialog.accept()
+
+        update_conflicts()
         buttons.accepted.connect(save)
-        dialog.resize(450, 520)
+        dialog.resize(520, 560)
         dialog.exec()
 
     def _feedback_repository(self):

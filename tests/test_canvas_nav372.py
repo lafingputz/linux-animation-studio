@@ -1,4 +1,4 @@
-"""v0.37.2: every temporary canvas navigation key is user-configurable."""
+"""v0.37.3: every temporary canvas navigation key is user-configurable."""
 from pathlib import Path
 import unittest
 
@@ -26,15 +26,15 @@ class NavigationKeySourceTests(unittest.TestCase):
         self.assertIn('self._update_navigation_shortcuts()\n            dialog.accept()',SRC)
 
     def test_preferences_detect_conflicts_and_reset_defaults(self):
-        self.assertIn("if key in used:",SRC)
+        self.assertIn("find_shortcut_conflicts(sequences)",SRC)
         self.assertIn('editors[name].setKeySequence(QKeySequence(default))', SRC)
         self.assertIn("'ctrl+n','ctrl+o','ctrl+s'", SRC)
         self.assertNotIn("Space is reserved for canvas panning", SRC)
 
     def test_versions_and_file_format(self):
-        self.assertIn('APP_VERSION = "0.37.2"',SRC)
+        self.assertIn('APP_VERSION = "0.37.3"',SRC)
         self.assertIn('PROJECT_VERSION = 6',SRC)
-        self.assertIn("VERSION = '0.37.2'",(ROOT/'tools/package_release.py').read_text())
+        self.assertIn("VERSION = '0.37.3'",(ROOT/'tools/package_release.py').read_text())
 
 try:
     from PySide6.QtCore import Qt, QEvent
