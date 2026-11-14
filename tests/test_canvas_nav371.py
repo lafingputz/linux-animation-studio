@@ -13,14 +13,14 @@ class RotationResetShortcutTests(unittest.TestCase):
         self.assertIn("self._reset_rotation_action = viewmenu.addAction", SRC)
 
     def test_modified_r_does_not_trigger_temporary_rotate(self):
-        self.assertIn('has_command_modifier = bool(event.modifiers()', SRC)
+        self.assertIn('def _navigation_press_mode(self, event):', SRC)
         self.assertIn('Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier', SRC)
-        self.assertIn("mode in ('rotate', 'zoom') and has_command_modifier", SRC)
+        self.assertIn('actual == required', SRC)
 
     def test_version_and_project_compatibility(self):
-        self.assertIn('APP_VERSION = "0.37.1"', SRC)
+        self.assertIn('APP_VERSION = "0.37.2"', SRC)
         self.assertIn('PROJECT_VERSION = 6', SRC)
-        self.assertIn("VERSION = '0.37.1'", (ROOT / 'tools/package_release.py').read_text(encoding='utf-8'))
+        self.assertIn("VERSION = '0.37.2'", (ROOT / 'tools/package_release.py').read_text(encoding='utf-8'))
 
 if __name__ == '__main__':
     unittest.main()

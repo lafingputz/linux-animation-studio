@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.37.1: Canvas rotation reset shortcut."""
+"""Linux Animation Studio v0.37.2: customizable canvas navigation shortcuts."""
 import io
 import wave
 import time
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region, expand_region, edge_aware_expand_region
 
-APP_VERSION = "0.37.1"
+APP_VERSION = "0.37.2"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2363,6 +2363,11 @@ class PannableScrollArea(QScrollArea):
         self._space_down = False
         self._nav_held = []   # Key press ordering; Space always has priority.
         self._nav_dragged = set()
+        # mode -> (Qt key, Qt keyboard modifiers). Populated from QSettings.
+        self._navigation_bindings = {}
+        # Preserve the owning mode until its actual key release, even if a
+        # modifier is released first or the shortcut changes in Preferences.
+        self._navigation_pressed = {}
         self._view_drag = None
         self._view_drag_device = None
         self._view_drag_source = None
@@ -2386,6 +2391,21 @@ class PannableScrollArea(QScrollArea):
         widget.installEventFilter(self)
         widget.grabGesture(Qt.GestureType.PinchGesture)
         self._update_mode()
+
+    def set_navigation_shortcuts(self, bindings):
+        """Install the user-configured tap/hold navigation key combinations."""
+        self._navigation_bindings = dict(bindings)
+        self._update_mode()
+
+    def _navigation_press_mode(self, event):
+        """Match modifiers exactly so Ctrl+R never accidentally holds Rotate."""
+        mods = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier |
+                Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier)
+        actual = event.modifiers() & mods
+        for mode, (key, required) in self._navigation_bindings.items():
+            if event.key() == key and actual == required:
+                return mode
+        return None
 
     def _log_pan(self, message):
         if self._pan_debug:
@@ -2586,29 +2606,31 @@ class PannableScrollArea(QScrollArea):
             return False
 
         if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-            key = event.key()
-            mode = ('pan' if key == Qt.Key.Key_Space else
-                    'zoom' if key == Qt.Key.Key_Z else
-                    'rotate' if key == Qt.Key.Key_R else None)
-            if mode is None or not self.window().isActiveWindow():
+            if not self.window().isActiveWindow() or self._is_typing():
                 return False
-            if self._is_typing() or not self._canvas or not self._canvas.isVisible():
+            if not self._canvas or not self._canvas.isVisible():
                 return False
-            # Modifier shortcuts (Ctrl+R on Windows/Linux, Command+R on macOS)
-            # belong to the QShortcut system, not the temporary R/Z navigation
-            # handler. On key release, still honor a navigation key that was
-            # already held before modifiers changed.
-            has_command_modifier = bool(event.modifiers() & (
-                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
-            if mode in ('rotate', 'zoom') and has_command_modifier and mode not in self._nav_held:
+            pressed = t == QEvent.Type.KeyPress
+            # Key releases use the original press owner, not current modifiers.
+            # This prevents stranded modes if Shift/Ctrl/Alt is released first.
+            mode = (self._navigation_press_mode(event) if pressed
+                    else self._navigation_pressed.get(event.key()))
+            if mode is None:
                 return False
             if event.isAutoRepeat():
+                event.accept()
                 return True
-            pressed = t == QEvent.Type.KeyPress
+            if pressed:
+                if event.key() in self._navigation_pressed:
+                    event.accept()
+                    return True
+                self._navigation_pressed[event.key()] = mode
+            else:
+                self._navigation_pressed.pop(event.key(), None)
             if mode == 'pan':
                 self._space_down = pressed
                 if not pressed and self._pan_state == 'dragging' and not self._is_pan_tool():
-                    self._stop_pan('space_released')
+                    self._stop_pan('pan_shortcut_released')
             else:
                 if pressed:
                     if mode not in self._nav_held:
@@ -2622,7 +2644,7 @@ class PannableScrollArea(QScrollArea):
                     if self._view_drag == mode:
                         self._end_view_drag()
                     if was_held and not used_for_drag and self.on_tool_tap is not None:
-                        self.on_tool_tap(mode)  # Tap Z/R selects a persistent tool.
+                        self.on_tool_tap(mode)  # Tap key selects a persistent tool.
             self._update_mode()
             event.accept()
             return True
@@ -2630,6 +2652,7 @@ class PannableScrollArea(QScrollArea):
         if t in (QEvent.Type.ApplicationDeactivate, QEvent.Type.WindowDeactivate):
             if t == QEvent.Type.ApplicationDeactivate or obj is self.window():
                 self._space_down = False
+                self._navigation_pressed.clear()
                 self._nav_held.clear()
                 self._nav_dragged.clear()
                 self._end_view_drag()
@@ -4009,6 +4032,9 @@ class MainWindow(QMainWindow):
             ('Cycle Lasso Tools', 'Shift+L', self._cycle_lasso),
             ('Transform Tool', 'T', lambda: self._tool_shortcut('transform')),
             ('Hand / Pan Tool', 'H', lambda: self._tool_shortcut('pan')),
+            ('Temporary / Tap Rotate Tool', 'R', lambda: None),
+            ('Temporary / Tap Zoom Tool', 'Z', lambda: None),
+            ('Temporary Pan', 'Space', lambda: None),
             ('Reset Canvas Rotation', 'Ctrl+R', self.reset_canvas_rotation),
             ('Select All', 'Ctrl+A', self.canvas.select_all),
             ('Deselect', 'Ctrl+D', self.canvas.deselect),
@@ -4037,6 +4063,7 @@ class MainWindow(QMainWindow):
         ]
         self._shortcut_objects = {}
         self._install_shortcuts()
+        self._update_navigation_shortcuts()
         self._update_reset_rotation_shortcut_hint()
         # Existing alternative frame navigation remains unchanged.
         for seq, fn in [('Alt+Left', lambda: self.navigate_frame(-1)), ('Alt+Right', lambda: self.navigate_frame(1))]:
@@ -4913,6 +4940,23 @@ class MainWindow(QMainWindow):
         if self.project_active and self._clear_shortcut_allowed():
             self.canvas.clear_active_cel()
 
+    _navigation_shortcut_names = {
+        'Temporary / Tap Rotate Tool': 'rotate',
+        'Temporary / Tap Zoom Tool': 'zoom',
+        'Temporary Pan': 'pan',
+    }
+
+    def _update_navigation_shortcuts(self):
+        """Sync QSettings-backed shortcut objects with the canvas event filter."""
+        bindings = {}
+        for name, mode in self._navigation_shortcut_names.items():
+            sequence = self._shortcut_objects[name].key()
+            if sequence.count() != 1:
+                continue
+            combination = sequence[0]
+            bindings[mode] = (combination.key(), combination.keyboardModifiers())
+        self.canvas_scroll.set_navigation_shortcuts(bindings)
+
     def _install_shortcuts(self):
         for name, default, callback in self._shortcut_defs:
             sequence = str(self.preferences.value('shortcuts/' + name, default))
@@ -4923,7 +4967,12 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(sequence), parent)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut if is_clear_key
                                 else Qt.ShortcutContext.WindowShortcut)
-            shortcut.activated.connect(callback)
+            if name in self._navigation_shortcut_names:
+                # The event filter owns BOTH key-down and key-up. QShortcut
+                # cannot provide a release event and would consume the press.
+                shortcut.setEnabled(False)
+            else:
+                shortcut.activated.connect(callback)
             self._shortcut_objects[name] = shortcut
 
     def _update_reset_rotation_shortcut_hint(self):
@@ -4938,7 +4987,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle('Keyboard Shortcuts')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('Enter Qt shortcut sequences (e.g. Ctrl+Shift+R). Pan remains Space+drag. Tool letters do not act while typing.'))
+        layout.addWidget(QLabel('Enter Qt shortcuts (e.g. Ctrl+Shift+R). Rotate, Zoom and Temporary Pan support tap/hold and can be reassigned. Navigation keys do not act while typing.'))
         form = QFormLayout()
         from PySide6.QtWidgets import QKeySequenceEdit
         editors = {}
@@ -4969,9 +5018,21 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(dialog, 'Shortcut conflict', f'{name} conflicts with {used[key]}.')
                     return
                 used[key] = name
-                if key in ('space', 'shift+space'):
-                    QMessageBox.warning(dialog, 'Reserved key', 'Space is reserved for canvas panning.')
+            # Navigation shortcuts require a single key combination, since both
+            # key-down and key-up are needed for temporary tool behavior.
+            for name in self._navigation_shortcut_names:
+                sequence = QKeySequence(sequences[name])
+                if sequence.count() != 1:
+                    QMessageBox.warning(dialog, 'Navigation shortcut',
+                                        f'{name} must use exactly one key combination.')
                     return
+                combo = sequence[0]
+                if combo.key() in (Qt.Key.Key_unknown, Qt.Key.Key_Control,
+                                   Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta):
+                    QMessageBox.warning(dialog, 'Navigation shortcut',
+                                        f'{name} must use a non-modifier key.')
+                    return
+            # Keys that are part of native menu accelerators must remain available.
             # File-menu shortcuts remain reserved until unified action routing.
             reserved = {'ctrl+n','ctrl+o','ctrl+s','ctrl+shift+s','ctrl+w','ctrl+i','ctrl+e','ctrl+q'}
             if any(seq.lower() in reserved for seq in sequences.values()):
@@ -4981,6 +5042,7 @@ class MainWindow(QMainWindow):
                 self.preferences.setValue('shortcuts/' + name, sequence)
                 self._shortcut_objects[name].setKey(QKeySequence(sequence))
             self._update_reset_rotation_shortcut_hint()
+            self._update_navigation_shortcuts()
             dialog.accept()
         buttons.accepted.connect(save)
         dialog.resize(450, 520)
