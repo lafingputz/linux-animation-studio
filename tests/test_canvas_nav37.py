@@ -1,4 +1,4 @@
-"""v0.37.0 canvas navigation regression checks.
+"""v0.37.1 canvas navigation regression checks.
 
 These tests validate the implementation's transform geometry when Qt is present.
 Source checks still execute in lightweight CI environments without PySide6.
@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class NavigationSourceTests(unittest.TestCase):
     def test_version_and_no_format_bump(self):
         src = (ROOT / 'main.py').read_text(encoding='utf-8')
-        self.assertIn('APP_VERSION = "0.37.0"', src)
+        self.assertIn('APP_VERSION = "0.37.1"', src)
         self.assertIn('PROJECT_VERSION = 6', src)
-        self.assertIn("VERSION = '0.37.0'", (ROOT / 'tools/package_release.py').read_text(encoding='utf-8'))
+        self.assertIn("VERSION = '0.37.1'", (ROOT / 'tools/package_release.py').read_text(encoding='utf-8'))
 
     def test_navigation_uses_view_transforms(self):
         src = (ROOT / 'main.py').read_text(encoding='utf-8')

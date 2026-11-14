@@ -1,8 +1,14 @@
-# Linux Animation Studio v0.37.0: Canvas Navigation Overhaul
+# Linux Animation Studio v0.37.1: Reset Canvas Rotation Shortcut
 
 **Test candidate, not an official release.** This update retains the Linux Animation Studio name, SpynFrame icon trial, and `.las` project format v6. Installers remain unsigned/unnotarized on macOS.
 
-## New in v0.37.0
+## New in v0.37.1
+
+- **Reset rotation shortcut:** Ctrl+R (Windows/Linux) or Command+R (macOS) resets the canvas view to 0°.
+- **Customizable:** Edit the reset shortcut in Edit → Keyboard Shortcuts; the View menu displays the current binding.
+- **No tool conflict:** Modified R does not trigger temporary Rotate Tool selection. Normal R+drag, Z+drag, Space+drag remain unchanged.
+- **Regression testing:** Check brush pressure, rotated pen coordinates, modifier behavior, View menu hint, key remapping, reset with no project, and native packaging.
+
 
 - **Rotate view (R):** Hold **R** and drag the pen/mouse horizontally to spin the *canvas view* without rotating pixels, cels, thumbnails, or exported artwork. Release R to continue with the previous tool. Tap R without dragging to select the persistent **Rotate** toolbar tool.
 - **Zoom tool (Z):** Hold **Z** and drag right to zoom in or left to zoom out. Release Z to return to the previous drawing tool. Tap Z to select the persistent **Zoom** toolbar tool; click to zoom in, or **Alt+click** to zoom out.

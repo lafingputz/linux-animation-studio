@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.37.0: Canvas navigation and trackpad gestures."""
+"""Linux Animation Studio v0.37.1: Canvas rotation reset shortcut."""
 import io
 import wave
 import time
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region, expand_region, edge_aware_expand_region
 
-APP_VERSION = "0.37.0"
+APP_VERSION = "0.37.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2594,6 +2594,14 @@ class PannableScrollArea(QScrollArea):
                 return False
             if self._is_typing() or not self._canvas or not self._canvas.isVisible():
                 return False
+            # Modifier shortcuts (Ctrl+R on Windows/Linux, Command+R on macOS)
+            # belong to the QShortcut system, not the temporary R/Z navigation
+            # handler. On key release, still honor a navigation key that was
+            # already held before modifiers changed.
+            has_command_modifier = bool(event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+            if mode in ('rotate', 'zoom') and has_command_modifier and mode not in self._nav_held:
+                return False
             if event.isAutoRepeat():
                 return True
             pressed = t == QEvent.Type.KeyPress
@@ -3971,7 +3979,7 @@ class MainWindow(QMainWindow):
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
         self._build_animation_menu()
         viewmenu = self.menuBar().addMenu('&View')
-        viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
+        self._reset_rotation_action = viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
         viewmenu.addSeparator()
         viewmenu.addAction('Reset Workspace Layout', self.reset_workspace_layout)
         for name, dock in self._docks.items():
@@ -4001,6 +4009,7 @@ class MainWindow(QMainWindow):
             ('Cycle Lasso Tools', 'Shift+L', self._cycle_lasso),
             ('Transform Tool', 'T', lambda: self._tool_shortcut('transform')),
             ('Hand / Pan Tool', 'H', lambda: self._tool_shortcut('pan')),
+            ('Reset Canvas Rotation', 'Ctrl+R', self.reset_canvas_rotation),
             ('Select All', 'Ctrl+A', self.canvas.select_all),
             ('Deselect', 'Ctrl+D', self.canvas.deselect),
             ('Clear Selected Pixels', 'Delete', self.clear_selected_pixels),
@@ -4028,6 +4037,7 @@ class MainWindow(QMainWindow):
         ]
         self._shortcut_objects = {}
         self._install_shortcuts()
+        self._update_reset_rotation_shortcut_hint()
         # Existing alternative frame navigation remains unchanged.
         for seq, fn in [('Alt+Left', lambda: self.navigate_frame(-1)), ('Alt+Right', lambda: self.navigate_frame(1))]:
             shortcut = QShortcut(QKeySequence(seq), self)
@@ -4916,6 +4926,14 @@ class MainWindow(QMainWindow):
             shortcut.activated.connect(callback)
             self._shortcut_objects[name] = shortcut
 
+    def _update_reset_rotation_shortcut_hint(self):
+        # Display the user-selected binding without introducing a second action
+        # accelerator (QShortcut alone owns the key dispatch).
+        shortcut = self._shortcut_objects['Reset Canvas Rotation'].key().toString(
+            QKeySequence.SequenceFormat.NativeText)
+        label = 'Reset Canvas Rotation (0°)'
+        self._reset_rotation_action.setText(label + (f'   ({shortcut})' if shortcut else ''))
+
     def show_shortcut_preferences(self):
         dialog = QDialog(self)
         dialog.setWindowTitle('Keyboard Shortcuts')
@@ -4962,6 +4980,7 @@ class MainWindow(QMainWindow):
             for name, sequence in sequences.items():
                 self.preferences.setValue('shortcuts/' + name, sequence)
                 self._shortcut_objects[name].setKey(QKeySequence(sequence))
+            self._update_reset_rotation_shortcut_hint()
             dialog.accept()
         buttons.accepted.connect(save)
         dialog.resize(450, 520)
