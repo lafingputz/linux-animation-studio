@@ -77,3 +77,54 @@ def flood_region(pixels, width, height, x, y, tolerance=0, contiguous=True, allo
                     pending.append(i)
                 in_run = eligible
     return result
+
+
+def expand_region(region, width, height, radius, allowed=None):
+    """Expand a binary fill mask by up to ``radius`` pixels (square footprint).
+
+    This operates on the *resulting region*, never the boundary tolerance.
+    Selection restrictions are reapplied after expansion, so the fringe cannot
+    escape a selection even if selected pixels surround unselected holes.
+    Runs in O(width * height) for any radius using horizontal + vertical passes.
+    The input is not mutated.
+    """
+    width, height = int(width), int(height)
+    n = width * height
+    if width <= 0 or height <= 0 or len(region) != n:
+        raise ValueError('Invalid region dimensions')
+    if allowed is not None and len(allowed) != n:
+        raise ValueError('Invalid selection mask')
+    radius = max(0, min(10, int(radius)))
+    original = bytearray(bool(v) for v in region)
+    if radius == 0 or not any(original):
+        if allowed is not None:
+            for i, selected in enumerate(allowed):
+                if not selected:
+                    original[i] = 0
+        return original
+    horizontal = bytearray(n)
+    # Centered sliding window, reset at each row (never wrap horizontally).
+    for y in range(height):
+        start = y * width
+        running = sum(original[start:start + min(width, radius + 1)])
+        for x in range(width):
+            horizontal[start + x] = int(running > 0)
+            add_x = x + radius + 1
+            remove_x = x - radius
+            if add_x < width:
+                running += original[start + add_x]
+            if remove_x >= 0:
+                running -= original[start + remove_x]
+    expanded = bytearray(n)
+    for x in range(width):
+        running = sum(horizontal[x + y * width] for y in range(min(height, radius + 1)))
+        for y in range(height):
+            i = y * width + x
+            expanded[i] = int(running > 0 and (allowed is None or allowed[i]))
+            add_y = y + radius + 1
+            remove_y = y - radius
+            if add_y < height:
+                running += horizontal[add_y * width + x]
+            if remove_y >= 0:
+                running -= horizontal[remove_y * width + x]
+    return expanded

@@ -14,10 +14,10 @@ class SourceStructure(unittest.TestCase):
     def test_versions(self):
         source = (ROOT/'main.py').read_text(encoding='utf-8')
         ast.parse(source)
-        self.assertIn('APP_VERSION = "0.36.0"',source)
+        self.assertIn('APP_VERSION = "0.36.1"',source)
         self.assertIn('PROJECT_VERSION = 6',source)
         from tools.package_release import VERSION
-        self.assertEqual(VERSION,'0.36.0')
+        self.assertEqual(VERSION,'0.36.1')
 
     def test_reference_code(self):
         source = (ROOT/'main.py').read_text(encoding='utf-8')

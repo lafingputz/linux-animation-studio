@@ -19,7 +19,7 @@ class ClearSourceTests(unittest.TestCase):
     def test_hooks_and_version(self):
         source = (ROOT / 'main.py').read_text(encoding='utf-8')
         tree = ast.parse(source)
-        self.assertIn('APP_VERSION = "0.36.0"', source)
+        self.assertIn('APP_VERSION = "0.36.1"', source)
         self.assertIn('PROJECT_VERSION = 6', source)
         for phrase in ("('Clear Selected Pixels', 'Delete'",
                        "('Clear Selected Pixels Alternative', 'Backspace'",

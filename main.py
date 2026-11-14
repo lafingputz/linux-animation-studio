@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.36.0: advanced coloring and SpynFrame icon trial."""
+"""Linux Animation Studio v0.36.1: Paint Bucket edge expansion and cleanup."""
 import io
 import wave
 import time
@@ -28,9 +28,9 @@ from PySide6.QtWidgets import (
 )
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
-from fill_support import flood_region
+from fill_support import flood_region, expand_region
 
-APP_VERSION = "0.36.0"
+APP_VERSION = "0.36.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -253,6 +253,7 @@ class Canvas(QWidget):
         self.zoom = 1.0
         self.tool = 'brush'  # brush, eraser, fill, select, transform, pan
         self.fill_tolerance = 24
+        self.fill_expansion = 2
         self.fill_contiguous = True
         self.fill_source = "active"  # active, visible, reference
         self.selection = None  # Bounding QRect in document pixels
@@ -1578,11 +1579,13 @@ class Canvas(QWidget):
                                   selection)
             if not any(region):
                 continue
-            # Build a transparent overlay with only the pixels in the chosen
-            # region. One Qt composition call applies the color, using the
-            # antialiased selection path as a clip when present.
-            overlay = transparent_image(width, height)
-            pixels = overlay.bits().cast('I')
+            expansion = max(0, min(10, int(self.fill_expansion)))
+            expanded = expand_region(region, width, height, expansion, selection)
+            # The expansion fringe is painted *behind* existing pixels when
+            # sampling the target layer. This preserves anti-aliased ink: the
+            # new color shows through transparent edge pixels without covering
+            # their original shade. On reference/visible sampling the outline
+            # normally resides on another layer, so normal SourceOver applies.
             argb = self.color.rgba()
             premul = QColor.fromRgba(argb).rgba()
             if (argb >> 24) != 255:
@@ -1591,17 +1594,32 @@ class Canvas(QWidget):
                           (((argb >> 16 & 255) * a + 127) // 255 << 16) |
                           (((argb >> 8 & 255) * a + 127) // 255 << 8) |
                           (((argb & 255) * a + 127) // 255))
-            for i, chosen in enumerate(region):
+            core_overlay = transparent_image(width, height)
+            core_pixels = core_overlay.bits().cast('I')
+            fringe_overlay = transparent_image(width, height) if expansion else None
+            fringe_pixels = fringe_overlay.bits().cast('I') if fringe_overlay is not None else None
+            for i, chosen in enumerate(expanded):
                 if chosen:
-                    pixels[i] = premul
-            del pixels
+                    if region[i]:
+                        core_pixels[i] = premul
+                    elif fringe_pixels is not None:
+                        fringe_pixels[i] = premul
+            del core_pixels
+            if fringe_pixels is not None:
+                del fringe_pixels
             after = before.copy()
             painter = QPainter(after)
             if self.selection_path is not None:
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 painter.setClipPath(self.selection_path)
+            if fringe_overlay is not None:
+                if self.fill_source == 'active':
+                    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOver)
+                else:
+                    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+                painter.drawImage(0, 0, fringe_overlay)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            painter.drawImage(0, 0, overlay)
+            painter.drawImage(0, 0, core_overlay)
             painter.end()
             if before != after:
                 changes.append(dict(id=target.id, cel_id=target.cel_id,
@@ -1611,7 +1629,7 @@ class Canvas(QWidget):
         command = dict(type='cel_clear', changes=changes)
         self._apply(command, True)
         self._push(command)
-        self.diagnostic.emit(f'Filled {len(changes)} cel(s); tolerance {self.fill_tolerance}.')
+        self.diagnostic.emit(f'Filled {len(changes)} cel(s); tolerance {self.fill_tolerance}, expansion {self.fill_expansion}px.')
         return True
 
     def tabletEvent(self, event):
@@ -3342,6 +3360,17 @@ class MainWindow(QMainWindow):
         self.fill_tolerance_input.editingFinished.connect(self.return_canvas_focus)
         left.addWidget(QLabel('Fill tolerance'))
         left.addWidget(self.fill_tolerance_input)
+        left.addWidget(QLabel('Fill expansion (pixels)'))
+        self.fill_expansion_input = QSpinBox()
+        self.fill_expansion_input.setRange(0, 10)
+        self.fill_expansion_input.setValue(self.canvas.fill_expansion)
+        self.fill_expansion_input.setToolTip(
+            'Grow the filled area by 0–10 pixels beneath anti-aliased outlines. '
+            'Does not affect tolerance; respects selections and canvas edges.')
+        self.fill_expansion_input.valueChanged.connect(
+            lambda value: setattr(self.canvas, 'fill_expansion', value))
+        self.fill_expansion_input.editingFinished.connect(self.return_canvas_focus)
+        left.addWidget(self.fill_expansion_input)
         self.fill_contiguous_check = QCheckBox('Contiguous (connected area only)')
         self.fill_contiguous_check.setChecked(True)
         self.fill_contiguous_check.toggled.connect(lambda checked: setattr(self.canvas, 'fill_contiguous', checked))

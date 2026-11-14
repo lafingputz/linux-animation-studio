@@ -1,4 +1,16 @@
-# Linux Animation Studio v0.36.0: Advanced Coloring + SpynFrame Icon Trial
+# Linux Animation Studio v0.36.1: Paint Bucket Edge Expansion + SpynFrame Icon Trial
+
+## v0.36.1 changes
+
+- Added **Fill expansion (pixels)** to the Paint Bucket Tools settings: 0–10 px, default 2.
+- Expansion grows the selected fill mask separately from RGBA tolerance, reducing gaps at antialiased outlines.
+- On active-layer fills, expanded fringe is composited **behind existing ink** to preserve linework and color partially transparent edges.
+- On all-visible and marked-reference fills, expansion remains on the active layer and can extend beneath reference artwork.
+- Selection mask and canvas boundaries constrain expanded fills; existing multi-frame, linked-cel and undo paths are retained.
+- SpynFrame icon trial, Linux Animation Studio name, and `.las` version 6 remain unchanged.
+
+**Note:** Expansion is a square-neighborhood mask grow. With very thin/open lines, larger expansion values can cross boundaries; start with 1–2 px. For on-layer fills, the expanded fringe is placed behind existing pixels.
+
 
 **Test candidate, not an official release.** The application name and executable remain Linux Animation Studio; `.las` project format **v6** is unchanged. The supplied SpynFrame SVG has been used to create native application icons for Linux, Windows and macOS, with the original SVG retained at `assets/spynframe-icon.svg`.
 
