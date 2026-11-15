@@ -28,6 +28,6 @@ class ShortcutConflictTests(unittest.TestCase):
             with self.subTest(fragment=fragment): self.assertIn(fragment,SRC)
     def test_version(self):
         self.assertIn('APP_VERSION = "0.38.1"',SRC)
-        self.assertIn("VERSION = '0.38.1'",(ROOT/'tools/package_release.py').read_text())
+        self.assertIn("VERSION = '0.38.1'",(ROOT/'tools/package_release.py').read_text(encoding='utf-8'))
 
 if __name__=='__main__': unittest.main()

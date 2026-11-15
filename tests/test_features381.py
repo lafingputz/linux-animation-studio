@@ -23,14 +23,14 @@ class AspectLockTests(unittest.TestCase):
         with self.assertRaises(ValueError): resize_linked_dimension('width', 100, 0)
 
     def test_gui_wiring(self):
-        src=(ROOT/'main.py').read_text()
+        src=(ROOT/'main.py').read_text(encoding='utf-8')
         self.assertIn('self.aspect_lock.setChecked(True)',src)
         self.assertIn("self._dimensions_changed('width')",src)
         self.assertIn("self._dimensions_changed('height')",src)
         self.assertIn("self._aspect_ratio = self._pixel_width /",src)
 
     def test_accent_updates(self):
-        src=(ROOT/'main.py').read_text()
+        src=(ROOT/'main.py').read_text(encoding='utf-8')
         self.assertIn("b.setObjectName('LASToolSelectionButton')",src)
         self.assertIn('QToolButton#LASToolSelectionButton:checked',src)
         self.assertIn('background-color: {accent}',src)

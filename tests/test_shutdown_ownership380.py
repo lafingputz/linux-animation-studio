@@ -8,7 +8,7 @@ ROOT=Path(__file__).resolve().parents[1]
 class ShutdownOwnershipTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source=(ROOT/'main.py').read_text()
+        cls.source=(ROOT/'main.py').read_text(encoding='utf-8')
         cls.tree=ast.parse(cls.source)
 
     def test_preferences_dialog_deleted_before_theme_reapply(self):

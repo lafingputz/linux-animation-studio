@@ -36,7 +36,7 @@ class ProjectSetupTests(unittest.TestCase):
                       "('a4', 'A4 Portrait", "self.canvas.fps = fps", "self._apply_appearance()",
                       "'appearance/theme'", "'appearance/accent'",'PROJECT_VERSION = 6',
                       'APP_VERSION = "0.38.1"'):
-            with self.subTest(token=token):self.assertIn(token, SRC if token!="('a4', 'A4 Portrait" else (ROOT/'project_setup.py').read_text())
+            with self.subTest(token=token):self.assertIn(token, SRC if token!="('a4', 'A4 Portrait" else (ROOT/'project_setup.py').read_text(encoding='utf-8'))
 
 try:
     from PySide6.QtWidgets import QApplication
