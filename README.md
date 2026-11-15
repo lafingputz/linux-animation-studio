@@ -346,3 +346,15 @@ The Help → Configure Feedback Repository item stays separate and opens only th
 A packaged `.app` displays **Linux Animation Studio** in Finder and the application menu.
 When launching directly with `python main.py`, macOS may still label the interpreter process **Python**; the important functional check is that the macOS app-menu **Preferences…** opens the Appearance/Workspaces dialog.
 This revision does **not** include the Linux shutdown fix or the planned aspect-ratio/toolbar enhancements.
+
+
+### v0.38.0 corrective candidate: theme lifecycle stabilization
+
+This corrective build addresses an intermittent native Qt shutdown crash observed
+after changing Light/Dark to System in Preferences on macOS and Linux. Qt's
+Fusion style is installed once before constructing the main window, rather
+than replacing the application style on each theme change. Reapplying an
+already-active effective theme also skips unnecessary palette/stylesheet work.
+The change retains the macOS Preferences menu routing fix, the improved
+Light/Dark palette and contrast, and `.las` project format v6. Native testing
+is required to confirm whether the crash has been eliminated.

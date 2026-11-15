@@ -6079,9 +6079,13 @@ class MainWindow(QMainWindow):
             windows_light = windows_apps_use_light_theme() if sys.platform == 'win32' else None
             theme = resolve_system_theme(sys.platform, windows_light=windows_light,
                                          qt_scheme=scheme, fallback_dark=dark_background)
-        # Fusion honors the palette for menus, tabs, controls and dock widgets
-        # across Windows, Linux, and macOS; native styles may ignore roles.
-        app.setStyle('Fusion')
+        # Fusion is installed exactly once at startup, before any widgets exist.
+        # Replacing a live QStyle during a Preferences change can destroy
+        # Qt-owned objects still referenced by native menu/widget styles.
+        # Switching Light/Dark/System must only change the palette and colors.
+        appearance_key = (theme, QColor(accent).name())
+        if getattr(app, '_las_applied_appearance', None) == appearance_key:
+            return
         app.setPalette(make_application_palette(theme, accent))
         # Explicit menu contrast prevents white-on-light or dark-on-dark menus
         # even when platform-specific menu styling overrides palette roles.
@@ -6097,6 +6101,7 @@ class MainWindow(QMainWindow):
                               bg=menu_bg, fg=menu_text, border=menu_border,
                               accent=accent,
                               selected='#ffffff' if QColor(accent).lightness() < 160 else '#111111'))
+        app._las_applied_appearance = appearance_key
         # The workspace splitter and floating-dock styles are intentionally
         # managed independently, preserving pre-existing dock affordances.
 
@@ -6477,6 +6482,9 @@ if __name__ == '__main__':
     QCoreApplication.setOrganizationName('LinuxAnimationStudio')
     QCoreApplication.setApplicationName('LinuxAnimationStudio')
     app = QApplication(sys.argv)
+    # Install Fusion once, before creating any widgets. Never replace the
+    # application QStyle while Preferences is open or Qt objects are live.
+    app.setStyle('Fusion')
     # Keep the internal app name used by settings and data paths unchanged;
     # the user-facing display name belongs in the macOS application menu.
     app.setApplicationDisplayName('Linux Animation Studio')
