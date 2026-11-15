@@ -1,3 +1,14 @@
+## v0.38.0 Qt shutdown ownership correction (experimental)
+
+This test candidate adds explicit teardown of the Preferences dialog and main window
+before PySide6's Python interpreter finalizer, targeting the native Qt `QPushButtonWrapper`
+destruction crashes reported on macOS and Linux after theme changes. The macOS report
+points to PySide6/Qt 6.12 destroying a button during Python shutdown. This is a
+**hypothesis-based correction, not a confirmed native fix**. Please test repeated
+System/Light/Dark changes, cancelling Preferences, exiting without Preferences,
+project/audio shutdown, and app packaging on both systems. The app's visual themes,
+macOS menu roles, saved preferences, and `.las` v6 files are unchanged.
+
 # Linux Animation Studio v0.38.0: Preferences, Themes & Project Setup
 
 **Test candidate, not an official release.** The application still uses the Linux Animation Studio name, trial SpynFrame icon, and `.las` v6 project format. Native validation is required on Windows, Pop!_OS, and macOS.

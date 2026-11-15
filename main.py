@@ -6152,9 +6152,22 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.preferences.setValue('appearance/theme', theme.currentText())
-            self.preferences.setValue('appearance/accent', accent.name())
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            if accepted:
+                # Read dialog state before scheduling its destruction. Without
+                # this, repeated modal dialogs stay parented to MainWindow and
+                # can survive until PySide's interpreter-shutdown cleanup.
+                selected_theme = theme.currentText()
+                selected_accent = accent.name()
+                self.preferences.setValue('appearance/theme', selected_theme)
+                self.preferences.setValue('appearance/accent', selected_accent)
+        finally:
+            # Explicitly release the entire dialog hierarchy while Qt's event
+            # dispatcher is still alive; never manually delete child widgets.
+            dialog.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        if accepted:
             self._apply_appearance()
 
     def new_project(self):
@@ -6495,4 +6508,13 @@ if __name__ == '__main__':
         app.setWindowIcon(QIcon(str(icon_file)))
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    # PySide6's finalizer may otherwise encounter Qt-owned widgets still
+    # parented to the window (notably dialog buttons after style changes).
+    # Dispose the GUI while QApplication and its event dispatcher still exist.
+    # No manual QObject deletion or forced garbage collection is needed.
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    del window
+    sys.exit(exit_code)
