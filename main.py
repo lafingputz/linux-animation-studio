@@ -3392,6 +3392,22 @@ class WaylandFloatingDockHandle(QWidget):
 
 
 
+def accent_foreground(accent):
+    """Choose readable black/white text using the sRGB WCAG contrast ratio."""
+    color = QColor(accent)
+    if not color.isValid():
+        color = QColor('#e58532')
+    def linear(channel):
+        fraction = channel / 255.0
+        return fraction / 12.92 if fraction <= 0.04045 else ((fraction + 0.055) / 1.055) ** 2.4
+    luminance = (0.2126 * linear(color.red()) +
+                 0.7152 * linear(color.green()) +
+                 0.0722 * linear(color.blue()))
+    contrast_black = (luminance + 0.05) / 0.05
+    contrast_white = 1.05 / (luminance + 0.05)
+    return '#111111' if contrast_black >= contrast_white else '#ffffff'
+
+
 # Presentation preferences are strictly application-local, never stored in .las.
 def make_application_palette(theme, accent):
     """Return a Qt palette for explicit light/dark themes."""
@@ -3408,7 +3424,7 @@ def make_application_palette(theme, accent):
         QPalette.ColorRole.ToolTipBase: '#353b46' if dark else '#fff9e9',
         QPalette.ColorRole.ToolTipText: '#ffffff' if dark else '#20232b',
         QPalette.ColorRole.Highlight: accent,
-        QPalette.ColorRole.HighlightedText: '#ffffff' if QColor(accent).lightness() < 160 else '#111111',
+        QPalette.ColorRole.HighlightedText: accent_foreground(accent),
         QPalette.ColorRole.PlaceholderText: '#a7adb7' if dark else '#707987',
         QPalette.ColorRole.Mid: '#646c78' if dark else '#aeb7c3',
         QPalette.ColorRole.Dark: '#151821' if dark else '#b1b8c2',
@@ -4168,12 +4184,6 @@ class MainWindow(QMainWindow):
                 height: 9px;
             }
             QMainWindow::separator:hover { background-color: #8bb5df; }
-            QDockWidget::title {
-                background-color: #40546b;
-                color: #f3f7fd;
-                padding: 5px;
-                border: 1px solid #708da9;
-            }
         """)
         # The native floating title-bar drag behavior differs on Wayland.
         # Install a compositor-aware move grip only for Wayland floaters.
@@ -4245,6 +4255,7 @@ class MainWindow(QMainWindow):
         # Qt moves this action to the native macOS application menu. Give it
         # an explicit role to prevent misclassification of other Configure actions.
         preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        # Key dispatch is owned by the customizable Preferences QShortcut.
         self._build_animation_menu()
         viewmenu = self.menuBar().addMenu('&View')
         self._reset_rotation_action = viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
@@ -4267,6 +4278,7 @@ class MainWindow(QMainWindow):
         self._set_project_active(False)
         self._refresh_tool_icons()
         self._shortcut_defs = [
+            ('Preferences', 'Ctrl+,', self.show_preferences),
             ('Undo', 'Ctrl+Z', self.canvas.undo),
             ('Redo', 'Ctrl+Shift+Z', self.canvas.redo),
             ('Redo Alternative', 'Ctrl+Y', self.canvas.redo),
@@ -4692,6 +4704,7 @@ class MainWindow(QMainWindow):
         brush_button = self.tool_buttons['brush']
         brush_button.setMenu(brush_menu)
         brush_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        brush_button.setMinimumWidth(55)  # room for icon and menu arrow in both states
         brush_button.setToolTip('Brush: click to draw; arrow opens the Brush Library')
 
         eraser_menu = QMenu(self)
@@ -4703,6 +4716,7 @@ class MainWindow(QMainWindow):
         eraser_button = self.tool_buttons['eraser']
         eraser_button.setMenu(eraser_menu)
         eraser_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        eraser_button.setMinimumWidth(55)
         eraser_button.setToolTip('Eraser: click to erase; arrow opens eraser size library')
 
         selection_menu = QMenu(self)
@@ -4713,6 +4727,7 @@ class MainWindow(QMainWindow):
         select_button = self.tool_buttons['select']
         select_button.setMenu(selection_menu)
         select_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        select_button.setMinimumWidth(55)
 
     def _quick_brush(self, preset):
         self.set_tool('brush')
@@ -6125,19 +6140,41 @@ class MainWindow(QMainWindow):
         menu_border = '#707987' if dark else '#aeb7c3'
         # Style only the drawing-tool buttons, keeping all unrelated controls
         # under their native Fusion styles. Checked state follows set_tool().
-        app.setStyleSheet('QToolButton#LASToolSelectionButton:checked {{ '
-                          'background-color: {accent}; border: 2px solid {accent}; '
-                          'border-radius: 5px; color: {selected}; }} '
+        selected_text = accent_foreground(accent)
+        # Keep identical border width and padding for checked/unchecked tool
+        # buttons; otherwise MenuButtonPopup shifts the icon beneath its arrow.
+        app.setStyleSheet('QToolButton#LASToolSelectionButton {{ '
+                          'border: 2px solid transparent; border-radius: 5px; '
+                          'padding: 0px; margin: 0px; }} '
+                          'QToolButton#LASToolSelectionButton:checked {{ '
+                          'background-color: {accent}; border-color: {accent}; '
+                          'color: {selected}; }} '
                           'QToolButton#LASToolSelectionButton:checked:hover {{ '
                           'background-color: {accent}; }} '
                           'QMenu {{ background-color: {bg}; color: {fg}; '
                           'border: 1px solid {border}; }} '
                           'QMenu::item {{ padding: 5px 22px; }} '
                           'QMenu::item:selected {{ background-color: {accent}; '
-                          'color: {selected}; }}'.format(
+                          'color: {selected}; }} '
+                          'QListWidget::item:selected, QListView::item:selected, '
+                          'QTreeView::item:selected, QTableView::item:selected {{ '
+                          'background-color: {accent}; color: {selected}; }}'.format(
                               bg=menu_bg, fg=menu_text, border=menu_border,
-                              accent=accent,
-                              selected='#ffffff' if QColor(accent).lightness() < 160 else '#111111'))
+                              accent=accent, selected=selected_text))
+        # Docked panels use Qt's QDockWidget title, not the OS floating window
+        # chrome. In Light mode the original dark title + native dark text had
+        # poor contrast, so refresh the title scheme with every theme change.
+        dock_title_bg = '#d6dde7' if not dark else '#40546b'
+        dock_title_fg = '#20232b' if not dark else '#f3f7fd'
+        dock_title_border = '#9aa8b9' if not dark else '#708da9'
+        self.setStyleSheet('''QMainWindow::separator {
+            background-color: #607b99; width: 9px; height: 9px;
+        }
+        QMainWindow::separator:hover { background-color: #8bb5df; }
+        QDockWidget::title {
+            background-color: %s; color: %s;
+            padding: 5px; border: 1px solid %s;
+        }''' % (dock_title_bg, dock_title_fg, dock_title_border))
         app._las_applied_appearance = appearance_key
         # The workspace splitter and floating-dock styles are intentionally
         # managed independently, preserving pre-existing dock affordances.
