@@ -4810,6 +4810,18 @@ class MainWindow(QMainWindow):
             painter.setPen(QPen(white, 2))
             painter.drawLine(22, 24, 29, 29)
         painter.end()
+        # Qt stylesheet `color` affects QToolButton text, but not pixels in a
+        # hand-painted QIcon. Recolor only the checked tool's alpha mask with
+        # the same WCAG-contrasting foreground used for selected menu text.
+        # This preserves silhouettes (including custom brush tips), the menu
+        # arrow, and all toolbar geometry.
+        button = getattr(self, 'tool_buttons', {}).get(tool)
+        if button is not None and button.isChecked():
+            accent = self.preferences.value('appearance/accent', '#e58532')
+            icon_painter = QPainter(img)
+            icon_painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            icon_painter.fillRect(img.rect(), QColor(accent_foreground(accent)))
+            icon_painter.end()
         return QIcon(QPixmap.fromImage(img))
 
     def _refresh_tool_icons(self):
@@ -6176,6 +6188,9 @@ class MainWindow(QMainWindow):
             padding: 5px; border: 1px solid %s;
         }''' % (dock_title_bg, dock_title_fg, dock_title_border))
         app._las_applied_appearance = appearance_key
+        # Regenerate raster tool icons when the accent changes. A stylesheet
+        # alone cannot recolor pixels already baked into a QIcon.
+        self._refresh_tool_icons()
         # The workspace splitter and floating-dock styles are intentionally
         # managed independently, preserving pre-existing dock affordances.
 
