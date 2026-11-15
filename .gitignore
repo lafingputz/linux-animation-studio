@@ -2,7 +2,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-.DS_Store
 
 # Local native builds
 build/
@@ -11,3 +10,10 @@ dist/
 
 # Generated installation packages
 /releases/
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+._*

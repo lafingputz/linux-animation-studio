@@ -337,3 +337,12 @@ Source compiles and the non-GUI suite is run in this environment. PySide6 is not
 ### v0.37.3: Customizable navigation keys
 
 Under **Edit → Keyboard Shortcuts…**, change **Temporary / Tap Rotate Tool** (default R), **Temporary / Tap Zoom Tool** (default Z), and **Temporary Pan** (default Space). Tap/hold behavior follows the assigned combination; changing the key removes the old binding. The existing configurable **Reset Canvas Rotation** action defaults to Ctrl+R (Command+R on macOS). Navigation bindings must be a single key combination, are checked for duplicates, and persist between launches. Native file-menu shortcuts remain reserved.
+
+
+### macOS Preferences-menu correction (v0.38.0 test revision)
+
+The native application Preferences action is explicitly assigned to the macOS app menu.
+The Help → Configure Feedback Repository item stays separate and opens only the GitHub URL editor.
+A packaged `.app` displays **Linux Animation Studio** in Finder and the application menu.
+When launching directly with `python main.py`, macOS may still label the interpreter process **Python**; the important functional check is that the macOS app-menu **Preferences…** opens the Appearance/Workspaces dialog.
+This revision does **not** include the Linux shutdown fix or the planned aspect-ratio/toolbar enhancements.

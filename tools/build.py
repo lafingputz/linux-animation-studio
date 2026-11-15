@@ -2,6 +2,7 @@
 import argparse
 import importlib.util
 import os
+import plistlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -45,6 +46,16 @@ def main():
         # PyInstaller .app bundles place the native executable inside Contents/MacOS.
         binary_dir = dist / (APP + '.app') / 'Contents' / 'MacOS'
         result = dist / (APP + '.app')
+        # Finder and the macOS application menu derive their visible name
+        # from bundle metadata. Preserve executable and bundle identifiers.
+        info_path = result / 'Contents' / 'Info.plist'
+        if info_path.is_file():
+            with info_path.open('rb') as stream:
+                info = plistlib.load(stream)
+            info['CFBundleName'] = 'Linux Animation Studio'
+            info['CFBundleDisplayName'] = 'Linux Animation Studio'
+            with info_path.open('wb') as stream:
+                plistlib.dump(info, stream)
     else:
         binary_dir = dist / APP
         result = binary_dir / (APP + ('.exe' if os.name == 'nt' else ''))

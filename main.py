@@ -19,7 +19,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
+from PySide6.QtGui import QAction, QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
@@ -4211,7 +4211,10 @@ class MainWindow(QMainWindow):
         editmenu.addAction('Paint Bucket / Flood Fill   (G)', lambda: self._tool_shortcut('fill'))
         editmenu.addSeparator()
         editmenu.addAction('Keyboard Shortcuts…', self.show_shortcut_preferences)
-        editmenu.addAction('Preferences…', self.show_preferences)
+        preferences_action = editmenu.addAction('Preferences…', self.show_preferences)
+        # Qt moves this action to the native macOS application menu. Give it
+        # an explicit role to prevent misclassification of other Configure actions.
+        preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         self._build_animation_menu()
         viewmenu = self.menuBar().addMenu('&View')
         self._reset_rotation_action = viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
@@ -4224,9 +4227,13 @@ class MainWindow(QMainWindow):
         helpmenu.addAction('Request a Feature…', lambda: self._open_feedback_form('feature'))
         helpmenu.addSeparator()
         helpmenu.addAction('Copy System Information…', self.show_support_diagnostics)
-        helpmenu.addAction('Configure Feedback Repository…', self.configure_feedback_repository)
+        feedback_action = helpmenu.addAction('Configure Feedback Repository…', self.configure_feedback_repository)
+        # Not an application Preferences action; prevent Qt's macOS text heuristic
+        # from promoting this item into the application menu.
+        feedback_action.setMenuRole(QAction.MenuRole.NoRole)
         helpmenu.addSeparator()
-        helpmenu.addAction('About Linux Animation Studio', self.show_about)
+        about_action = helpmenu.addAction('About Linux Animation Studio', self.show_about)
+        about_action.setMenuRole(QAction.MenuRole.AboutRole)
         self._set_project_active(False)
         self._refresh_tool_icons()
         self._shortcut_defs = [
@@ -6470,6 +6477,9 @@ if __name__ == '__main__':
     QCoreApplication.setOrganizationName('LinuxAnimationStudio')
     QCoreApplication.setApplicationName('LinuxAnimationStudio')
     app = QApplication(sys.argv)
+    # Keep the internal app name used by settings and data paths unchanged;
+    # the user-facing display name belongs in the macOS application menu.
+    app.setApplicationDisplayName('Linux Animation Studio')
     # PyInstaller extracts --add-data assets to _MEIPASS.
     asset_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
     icon_file = asset_root / 'assets' / 'las.png'
