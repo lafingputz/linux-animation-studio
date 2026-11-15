@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.38.0: themes, preferences, and project setup."""
+"""Linux Animation Studio v0.38.1: canvas aspect lock and active-tool accent."""
 import io
 import wave
 import time
@@ -30,10 +30,10 @@ from PySide6.QtWidgets import (
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
 from fill_support import flood_region, expand_region, edge_aware_expand_region
 from shortcut_conflicts import find_shortcut_conflicts
-from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions
+from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions, resize_linked_dimension
 from appearance_support import resolve_system_theme, windows_apps_use_light_theme
 
-APP_VERSION = "0.38.0"
+APP_VERSION = "0.38.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -3448,6 +3448,15 @@ class NewProjectDialog(QDialog):
             field.setDecimals(2)
         form.addRow('Width:', self.width_field)
         form.addRow('Height:', self.height_field)
+        self.aspect_lock = QToolButton(self)
+        self.aspect_lock.setObjectName('LASAspectRatioLock')
+        self.aspect_lock.setCheckable(True)
+        self.aspect_lock.setChecked(True)
+        self.aspect_lock.setToolTip('Keep width and height proportional when either is edited')
+        self.aspect_lock.setAccessibleName('Lock canvas aspect ratio')
+        self._aspect_ratio = self._pixel_width / self._pixel_height
+        self._update_aspect_lock()
+        form.addRow('Aspect ratio:', self.aspect_lock)
         self.ppi = QSpinBox()
         self.ppi.setRange(1, 1200)
         self.ppi.setValue(300)
@@ -3475,8 +3484,9 @@ class NewProjectDialog(QDialog):
         self.unit.currentIndexChanged.connect(self._display_pixels)
         self.ppi.valueChanged.connect(self._ppi_changed)
         self.fps.valueChanged.connect(self._fps_changed)
-        self.width_field.valueChanged.connect(self._dimensions_changed)
-        self.height_field.valueChanged.connect(self._dimensions_changed)
+        self.width_field.valueChanged.connect(lambda _value: self._dimensions_changed('width'))
+        self.height_field.valueChanged.connect(lambda _value: self._dimensions_changed('height'))
+        self.aspect_lock.toggled.connect(self._aspect_lock_toggled)
         try:
             saved_ppi = int(preferences.value('new_project/ppi', 300))
             self.ppi.setValue(max(1, min(1200, saved_ppi)))
@@ -3491,8 +3501,22 @@ class NewProjectDialog(QDialog):
             self.preset.blockSignals(False)
         except (ValueError, TypeError):
             pass
+        self._aspect_ratio = self._pixel_width / max(1, self._pixel_height)
         self._display_pixels()
         self._preferences = preferences
+
+    def _update_aspect_lock(self):
+        linked = self.aspect_lock.isChecked()
+        self.aspect_lock.setText('🔗 Linked' if linked else 'Unlinked')
+        self.aspect_lock.setToolTip(
+            'Width and height stay proportional' if linked
+            else 'Width and height can be changed independently')
+
+    def _aspect_lock_toggled(self, linked):
+        if linked:
+            # Capture the current ratio, including freehand edits while unlocked.
+            self._aspect_ratio = self._pixel_width / max(1, self._pixel_height)
+        self._update_aspect_lock()
 
     def _choose_preset(self):
         if self._refreshing:
@@ -3515,6 +3539,7 @@ class NewProjectDialog(QDialog):
             self._pixel_width, self._pixel_height = preset_dimensions(key, self.ppi.value())
         self._pixel_width = min(16384, self._pixel_width)
         self._pixel_height = min(16384, self._pixel_height)
+        self._aspect_ratio = self._pixel_width / max(1, self._pixel_height)
         self._display_pixels()
 
     def _ppi_changed(self, *_):
@@ -3567,18 +3592,22 @@ class NewProjectDialog(QDialog):
     def _fps_changed(self, *_):
         self.summary.setText(f'Actual canvas: {self._pixel_width:,} × {self._pixel_height:,} pixels • {self.fps.value()} FPS')
 
-    def _dimensions_changed(self, *_):
+    def _dimensions_changed(self, changed_axis=None):
         if self._refreshing:
             return
         unit = self.unit.currentData() or 'px'
         ppi = self.ppi.value()
-        self._pixel_width = unit_to_pixels(self.width_field.value(), unit, ppi)
-        self._pixel_height = unit_to_pixels(self.height_field.value(), unit, ppi)
+        width_px = max(1, unit_to_pixels(self.width_field.value(), unit, ppi))
+        height_px = max(1, unit_to_pixels(self.height_field.value(), unit, ppi))
+        if self.aspect_lock.isChecked() and changed_axis in ('width', 'height'):
+            value = width_px if changed_axis == 'width' else height_px
+            width_px, height_px = resize_linked_dimension(changed_axis, value, self._aspect_ratio)
+        self._pixel_width, self._pixel_height = width_px, height_px
         self._refreshing = True
         self.preset.setCurrentIndex(self.preset.findData('custom'))
         self._refreshing = False
-        self.summary.setText(f'Actual canvas: {self._pixel_width:,} × {self._pixel_height:,} pixels • {self.fps.value()} FPS')
-        self._draw_preview()
+        # Also refresh the companion dimension in the visible measurement unit.
+        self._display_pixels()
 
     def _accept(self):
         try:
@@ -3674,6 +3703,7 @@ class MainWindow(QMainWindow):
             b.setText(label)
             b.setToolTip(hint)
             b.setCheckable(True)
+            b.setObjectName('LASToolSelectionButton')
             b.setMinimumSize(37, 36)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             b.clicked.connect(lambda checked=False, t=tool: self.set_tool(t))
@@ -6093,7 +6123,14 @@ class MainWindow(QMainWindow):
         menu_bg = '#2b303a' if dark else '#ffffff'
         menu_text = '#f3f4f8' if dark else '#20232b'
         menu_border = '#707987' if dark else '#aeb7c3'
-        app.setStyleSheet('QMenu {{ background-color: {bg}; color: {fg}; '
+        # Style only the drawing-tool buttons, keeping all unrelated controls
+        # under their native Fusion styles. Checked state follows set_tool().
+        app.setStyleSheet('QToolButton#LASToolSelectionButton:checked {{ '
+                          'background-color: {accent}; border: 2px solid {accent}; '
+                          'border-radius: 5px; color: {selected}; }} '
+                          'QToolButton#LASToolSelectionButton:checked:hover {{ '
+                          'background-color: {accent}; }} '
+                          'QMenu {{ background-color: {bg}; color: {fg}; '
                           'border: 1px solid {border}; }} '
                           'QMenu::item {{ padding: 5px 22px; }} '
                           'QMenu::item:selected {{ background-color: {accent}; '

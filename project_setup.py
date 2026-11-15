@@ -59,3 +59,24 @@ def validate_project_dimensions(width, height, max_side=16384):
     if not 1 <= width <= max_side or not 1 <= height <= max_side:
         raise ValueError(f'Canvas dimensions must be between 1 and {max_side:,} pixels')
     return width, height
+
+
+def resize_linked_dimension(changed_axis, entered_pixels, aspect_ratio, max_side=16384):
+    """Resize one pixel dimension while preserving an existing width/height ratio.
+
+    Returns (width, height), with both dimensions kept in the supported range.
+    Pixel rounding may differ from the exact mathematical ratio by a fraction
+    of a pixel, which is unavoidable for raster canvases.
+    """
+    if changed_axis not in ('width', 'height'):
+        raise ValueError('Unknown dimension')
+    if not isfinite(aspect_ratio) or aspect_ratio <= 0:
+        raise ValueError('Invalid aspect ratio')
+    if not isfinite(entered_pixels):
+        raise ValueError('Invalid dimension')
+    primary = max(1, min(max_side, round(entered_pixels)))
+    if changed_axis == 'width':
+        primary = min(primary, max(1, int(max_side * aspect_ratio)))
+        return primary, max(1, min(max_side, round(primary / aspect_ratio)))
+    primary = min(primary, max(1, int(max_side / aspect_ratio)))
+    return max(1, min(max_side, round(primary * aspect_ratio))), primary

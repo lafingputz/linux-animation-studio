@@ -1,4 +1,11 @@
-## v0.38.0 Qt shutdown ownership correction (experimental)
+# Linux Animation Studio v0.38.1: Aspect-Ratio Lock and Accent Tool Selection
+
+- New Project: **Linked** aspect ratio is on by default. Editing Width adjusts Height and vice versa, across pixels/inches/millimeters. Unlink to edit independently; relink to preserve the newly chosen ratio. Selecting a preset resets the ratio to the preset's proportions.
+- The active toolbar tool now uses the configured accent color in Light, Dark, and System appearances. The accent updates when saved in Preferences.
+- Preserves the v0.38.0 Qt shutdown ownership corrections, macOS Preferences menu routing, macOS .gitignore rules and existing `.las` project compatibility.
+- Native Windows, Linux, and macOS regression testing is required before release.
+
+## v0.38.1 Qt shutdown ownership correction (experimental)
 
 This test candidate adds explicit teardown of the Preferences dialog and main window
 before PySide6's Python interpreter finalizer, targeting the native Qt `QPushButtonWrapper`
@@ -9,22 +16,22 @@ System/Light/Dark changes, cancelling Preferences, exiting without Preferences,
 project/audio shutdown, and app packaging on both systems. The app's visual themes,
 macOS menu roles, saved preferences, and `.las` v6 files are unchanged.
 
-# Linux Animation Studio v0.38.0: Preferences, Themes & Project Setup
+# Linux Animation Studio v0.38.1: Preferences, Themes & Project Setup
 
 **Test candidate, not an official release.** The application still uses the Linux Animation Studio name, trial SpynFrame icon, and `.las` v6 project format. Native validation is required on Windows, Pop!_OS, and macOS.
 
-## Updated v0.38.0 theme test candidate (Windows System appearance fix)
+## Updated v0.38.1 theme test candidate (Windows System appearance fix)
 
 The revised test candidate fixes System appearance on Windows: it reads the
 Windows **AppsUseLightTheme** preference instead of restoring a potentially
 bright generic Qt palette. On Linux/macOS, System uses the Qt platform color
 scheme when available. All modes now use a consistent Qt Fusion palette with
 explicit high-contrast menu colors. Existing theme, accent and project
-preferences are retained. If you installed an earlier v0.38.0 test candidate,
+preferences are retained. If you installed an earlier v0.38.1 test candidate,
 replace it with this revised source package and retest System, Light and Dark
 with the application restarted.
 
-## New in v0.38.0
+## New in v0.38.1
 
 - **Edit → Preferences…** offers application appearance **System**, **Light**, and **Dark**, plus a selectable **accent color**. Appearance settings persist in QSettings between launches and never modify project pixels. Existing Drawing/Animation workspace layouts and dock panels are preserved; Preferences includes an informational Workspaces tab. System mode uses the OS/Qt palette; detecting OS appearance changes may require restarting the app. Some legacy dock/button colors retain their original styling.
 - **One New Project dialog**, replacing the two sequential width/height prompts. Controls include canvas **presets**, editable width/height, **pixels/inches/mm**, **PPI**, **FPS (1–60)**, a proportion preview, and actual resulting pixel dimensions.
@@ -350,7 +357,7 @@ Source compiles and the non-GUI suite is run in this environment. PySide6 is not
 Under **Edit → Keyboard Shortcuts…**, change **Temporary / Tap Rotate Tool** (default R), **Temporary / Tap Zoom Tool** (default Z), and **Temporary Pan** (default Space). Tap/hold behavior follows the assigned combination; changing the key removes the old binding. The existing configurable **Reset Canvas Rotation** action defaults to Ctrl+R (Command+R on macOS). Navigation bindings must be a single key combination, are checked for duplicates, and persist between launches. Native file-menu shortcuts remain reserved.
 
 
-### macOS Preferences-menu correction (v0.38.0 test revision)
+### macOS Preferences-menu correction (v0.38.1 test revision)
 
 The native application Preferences action is explicitly assigned to the macOS app menu.
 The Help → Configure Feedback Repository item stays separate and opens only the GitHub URL editor.
@@ -359,7 +366,7 @@ When launching directly with `python main.py`, macOS may still label the interpr
 This revision does **not** include the Linux shutdown fix or the planned aspect-ratio/toolbar enhancements.
 
 
-### v0.38.0 corrective candidate: theme lifecycle stabilization
+### v0.38.1 corrective candidate: theme lifecycle stabilization
 
 This corrective build addresses an intermittent native Qt shutdown crash observed
 after changing Light/Dark to System in Preferences on macOS and Linux. Qt's
