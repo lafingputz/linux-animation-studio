@@ -1,4 +1,4 @@
-"""Regression checks for v0.38.1 UI and dimension math."""
+"""Regression checks for v0.39.0 UI and dimension math."""
 import unittest
 from pathlib import Path
 from project_setup import resize_linked_dimension

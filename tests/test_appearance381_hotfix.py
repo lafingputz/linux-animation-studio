@@ -1,4 +1,4 @@
-"""Cross-platform source checks for the v0.38.1 visual corrections."""
+"""Cross-platform source checks for the v0.39.0 visual corrections."""
 import unittest
 from pathlib import Path
 

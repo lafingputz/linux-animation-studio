@@ -1,3 +1,26 @@
+# Linux Animation Studio v0.39.0: Contextual Tools Panel
+
+## New in v0.39.0
+
+- The Tools dock now shows only settings related to the active Brush, Eraser,
+  Paint Bucket, Selection, or Transform tool. Pan, Zoom, and Rotate show a concise
+  usage hint instead of unrelated controls.
+- The original control widgets remain connected to Canvas and retain their values
+  when tools change. Brush and Eraser share the existing size spinbox, with each
+  tool's independent size retained by the existing tool switching behavior.
+- Right-click numeric tool settings to select **Reset to Default Value** for that
+  individual parameter. Custom brush presets are not deleted or globally reset.
+- Docking, workspace layouts, accent themes, macOS Preferences routing, and
+  the v0.38.x Qt shutdown fixes are preserved.
+- Project document format remains version 6 (`.las`).
+
+## v0.39.0 acceptance focus
+
+Test Brush → Fill → Selection → Eraser → Brush and confirm visible controls match
+and prior sizes/values persist. Check right-click resets on numeric controls,
+including while a custom brush is active. Check floating Tools dock, short-screen
+scroll behavior, and clean shutdown after repeated theme changes.
+
 # Linux Animation Studio v0.38.1: Aspect-Ratio Lock and Accent Tool Selection
 
 - New Project: **Linked** aspect ratio is on by default. Editing Width adjusts Height and vice versa, across pixels/inches/millimeters. Unlink to edit independently; relink to preserve the newly chosen ratio. Selecting a preset resets the ratio to the preset's proportions.

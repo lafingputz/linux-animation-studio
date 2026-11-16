@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.38.1: canvas aspect lock and active-tool accent."""
+"""Linux Animation Studio v0.39.0: contextual tool settings."""
 import io
 import wave
 import time
@@ -33,7 +33,7 @@ from shortcut_conflicts import find_shortcut_conflicts
 from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions, resize_linked_dimension
 from appearance_support import resolve_system_theme, windows_apps_use_light_theme
 
-APP_VERSION = "0.38.1"
+APP_VERSION = "0.39.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -3751,14 +3751,33 @@ class MainWindow(QMainWindow):
         left_panel = QWidget()
         left = QVBoxLayout(left_panel)
         left.setContentsMargins(5, 5, 5, 5)
-        left.addWidget(QLabel('TOOLS'))
+        self.tool_context_title = QLabel('Brush Settings')
+        self.tool_context_title.setObjectName('LASToolContextTitle')
+        font = self.tool_context_title.font()
+        font.setBold(True)
+        self.tool_context_title.setFont(font)
+        left.addWidget(self.tool_context_title)
+        self.tool_sections = {}
+        section_layouts = {}
+        for section in ('shared', 'brush', 'fill', 'select', 'transform'):
+            panel = QWidget(left_panel)
+            panel.setObjectName('LASToolSection_' + section)
+            layout = QVBoxLayout(panel)
+            layout.setContentsMargins(0, 1, 0, 1)
+            layout.setSpacing(6)
+            section_layouts[section] = layout
+            self.tool_sections[section] = panel
+            left.addWidget(panel)
+        self.tool_context_hint = QLabel()
+        self.tool_context_hint.setWordWrap(True)
+        left.addWidget(self.tool_context_hint)
         self.selection_mode_picker = QComboBox()
         self.selection_mode_picker.addItem('Rectangle', 'rectangle')
         self.selection_mode_picker.addItem('Freehand Lasso', 'freehand')
         self.selection_mode_picker.addItem('Polygonal Lasso', 'polygonal')
         self.selection_mode_picker.currentIndexChanged.connect(self._selection_mode_changed)
-        left.addWidget(QLabel('Selection mode'))
-        left.addWidget(self.selection_mode_picker)
+        section_layouts['select'].addWidget(QLabel('Selection mode'))
+        section_layouts['select'].addWidget(self.selection_mode_picker)
         transform_buttons = QHBoxLayout()
         apply_button = QPushButton('Apply Transform')
         apply_button.clicked.connect(lambda: self.canvas.apply_transform(keep_selection=False))
@@ -3766,11 +3785,11 @@ class MainWindow(QMainWindow):
         cancel_button = QPushButton('Cancel Transform')
         cancel_button.clicked.connect(self.canvas.cancel_transform)
         transform_buttons.addWidget(cancel_button)
-        left.addLayout(transform_buttons)
+        section_layouts['transform'].addLayout(transform_buttons)
         self.motion_transform_button = QPushButton('Transform Motion Object')
         self.motion_transform_button.clicked.connect(self.activate_motion_transform)
-        left.addWidget(self.motion_transform_button)
-        left.addWidget(QLabel('Brush / eraser diameter'))
+        section_layouts['transform'].addWidget(self.motion_transform_button)
+        section_layouts['shared'].addWidget(QLabel('Brush / eraser diameter'))
         size_row = QHBoxLayout()
         self.size_input = QSpinBox()
         self.size_input.setRange(1, 500)
@@ -3779,72 +3798,72 @@ class MainWindow(QMainWindow):
         self.size_input.valueChanged.connect(self.change_size)
         self.size_input.editingFinished.connect(self.return_canvas_focus)
         size_row.addWidget(self.size_input)
-        left.addLayout(size_row)
-        left.addWidget(QLabel('Brush preset'))
+        section_layouts['shared'].addLayout(size_row)
+        section_layouts['brush'].addWidget(QLabel('Brush preset'))
         self.brush_select = QComboBox()
         self.brush_select.addItems(['Round', 'Pencil', 'Ink', 'Airbrush'])
         self.brush_select.currentTextChanged.connect(self.change_brush_preset)
-        left.addWidget(self.brush_select)
+        section_layouts['brush'].addWidget(self.brush_select)
         self.custom_picker = QComboBox()
         self.custom_picker.addItem('Built-in preset', None)
         for ident, brush in sorted(self.canvas.custom_brushes.items(), key=lambda item: item[1]['name'].lower()):
             self.custom_picker.addItem(brush['name'], ident)
         self.custom_picker.currentIndexChanged.connect(self.choose_custom_brush)
-        left.addWidget(QLabel('Custom brush'))
-        left.addWidget(self.custom_picker)
+        section_layouts['brush'].addWidget(QLabel('Custom brush'))
+        section_layouts['brush'].addWidget(self.custom_picker)
         create_selected = QPushButton('Brush from Selection')
         create_selected.clicked.connect(self.make_custom_brush_from_selection)
-        left.addWidget(create_selected)
+        section_layouts['brush'].addWidget(create_selected)
         create_layer = QPushButton('Brush from Active Layer')
         create_layer.clicked.connect(self.make_custom_brush_from_layer)
-        left.addWidget(create_layer)
+        section_layouts['brush'].addWidget(create_layer)
         self.spacing_input = QSpinBox()
         self.spacing_input.setRange(1, 400)
         self.spacing_input.setSuffix(' %')
         self.spacing_input.setValue(30)
         self.spacing_input.valueChanged.connect(self.change_custom_spacing)
-        left.addWidget(QLabel('Stamp spacing (% of diameter)'))
-        left.addWidget(self.spacing_input)
-        left.addWidget(QLabel('Custom brush dynamics'))
+        section_layouts['brush'].addWidget(QLabel('Stamp spacing (% of diameter)'))
+        section_layouts['brush'].addWidget(self.spacing_input)
+        section_layouts['brush'].addWidget(QLabel('Custom brush dynamics'))
         self.follow_direction = QCheckBox('Rotate along stroke')
         self.follow_direction.toggled.connect(lambda v: self.change_custom_dynamic('follow_direction', v))
-        left.addWidget(self.follow_direction)
+        section_layouts['brush'].addWidget(self.follow_direction)
         self.dynamics_controls = {}
         for key, title, maximum in [('rotation_jitter','Random rotation (degrees)',180),
                                     ('scatter','Scatter (% of size)',200),
                                     ('pressure_size','Pressure affects size (%)',100),
                                     ('pressure_opacity','Pressure affects opacity (%)',100)]:
-            left.addWidget(QLabel(title))
+            section_layouts['brush'].addWidget(QLabel(title))
             widget = QSpinBox()
             widget.setRange(0, maximum)
             widget.valueChanged.connect(lambda value, k=key: self.change_custom_dynamic(k, value))
-            left.addWidget(widget)
+            section_layouts['brush'].addWidget(widget)
             self.dynamics_controls[key] = widget
         self.custom_preview = QLabel('Brush preview')
         self.custom_preview.setMinimumHeight(75)
         self.custom_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left.addWidget(self.custom_preview)
+        section_layouts['brush'].addWidget(self.custom_preview)
         delete_custom = QPushButton('Delete Custom Brush')
         delete_custom.clicked.connect(self.delete_custom_brush)
-        left.addWidget(delete_custom)
-        left.addWidget(QLabel('Brush opacity'))
+        section_layouts['brush'].addWidget(delete_custom)
+        section_layouts['brush'].addWidget(QLabel('Brush opacity'))
         self.brush_opacity = QSpinBox()
         self.brush_opacity.setRange(1, 100)
         self.brush_opacity.setSuffix(' %')
         self.brush_opacity.setValue(100)
         self.brush_opacity.valueChanged.connect(self.change_brush_opacity)
         self.brush_opacity.editingFinished.connect(self.return_canvas_focus)
-        left.addWidget(self.brush_opacity)
-        left.addWidget(QLabel('Paint Bucket / Flood Fill'))
+        section_layouts['brush'].addWidget(self.brush_opacity)
+        section_layouts['fill'].addWidget(QLabel('Paint Bucket / Flood Fill'))
         self.fill_tolerance_input = QSpinBox()
         self.fill_tolerance_input.setRange(0, 255)
         self.fill_tolerance_input.setValue(self.canvas.fill_tolerance)
         self.fill_tolerance_input.setToolTip('Maximum difference in each RGBA channel (0 = exact match).')
         self.fill_tolerance_input.valueChanged.connect(lambda value: setattr(self.canvas, 'fill_tolerance', value))
         self.fill_tolerance_input.editingFinished.connect(self.return_canvas_focus)
-        left.addWidget(QLabel('Fill tolerance'))
-        left.addWidget(self.fill_tolerance_input)
-        left.addWidget(QLabel('Fill expansion (pixels)'))
+        section_layouts['fill'].addWidget(QLabel('Fill tolerance'))
+        section_layouts['fill'].addWidget(self.fill_tolerance_input)
+        section_layouts['fill'].addWidget(QLabel('Fill expansion (pixels)'))
         self.fill_expansion_input = QSpinBox()
         self.fill_expansion_input.setRange(0, 10)
         self.fill_expansion_input.setValue(self.canvas.fill_expansion)
@@ -3854,7 +3873,7 @@ class MainWindow(QMainWindow):
         self.fill_expansion_input.valueChanged.connect(
             lambda value: setattr(self.canvas, 'fill_expansion', value))
         self.fill_expansion_input.editingFinished.connect(self.return_canvas_focus)
-        left.addWidget(self.fill_expansion_input)
+        section_layouts['fill'].addWidget(self.fill_expansion_input)
         self.fill_edge_aware_check = QCheckBox('Respect stroke edges (conservative)')
         self.fill_edge_aware_check.setChecked(self.canvas.fill_edge_aware)
         self.fill_edge_aware_check.setToolTip(
@@ -3862,8 +3881,8 @@ class MainWindow(QMainWindow):
             'For soft or open outlines, some gaps may remain.')
         self.fill_edge_aware_check.toggled.connect(
             lambda enabled: setattr(self.canvas, 'fill_edge_aware', enabled))
-        left.addWidget(self.fill_edge_aware_check)
-        left.addWidget(QLabel('Fill opacity'))
+        section_layouts['fill'].addWidget(self.fill_edge_aware_check)
+        section_layouts['fill'].addWidget(QLabel('Fill opacity'))
         self.fill_opacity_input = QSpinBox()
         self.fill_opacity_input.setRange(0, 100)
         self.fill_opacity_input.setSuffix(' %')
@@ -3871,12 +3890,12 @@ class MainWindow(QMainWindow):
         self.fill_opacity_input.valueChanged.connect(
             lambda value: setattr(self.canvas, 'fill_opacity', value))
         self.fill_opacity_input.editingFinished.connect(self.return_canvas_focus)
-        left.addWidget(self.fill_opacity_input)
+        section_layouts['fill'].addWidget(self.fill_opacity_input)
         self.fill_contiguous_check = QCheckBox('Contiguous (connected area only)')
         self.fill_contiguous_check.setChecked(True)
         self.fill_contiguous_check.toggled.connect(lambda checked: setattr(self.canvas, 'fill_contiguous', checked))
-        left.addWidget(self.fill_contiguous_check)
-        left.addWidget(QLabel('Fill sample source'))
+        section_layouts['fill'].addWidget(self.fill_contiguous_check)
+        section_layouts['fill'].addWidget(QLabel('Fill sample source'))
         self.fill_source_input = QComboBox()
         for title, source in (('Active layer', 'active'),
                               ('All visible layers', 'visible'),
@@ -3887,7 +3906,7 @@ class MainWindow(QMainWindow):
             'Right-click a layer to mark it as a fill reference.')
         self.fill_source_input.currentIndexChanged.connect(
             lambda i: setattr(self.canvas, 'fill_source', self.fill_source_input.itemData(i)))
-        left.addWidget(self.fill_source_input)
+        section_layouts['fill'].addWidget(self.fill_source_input)
         left.addStretch()
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
@@ -3896,6 +3915,8 @@ class MainWindow(QMainWindow):
         settings_scroll.setMaximumWidth(480)
         settings_scroll.setWidget(left_panel)
         self.settings_scroll = settings_scroll
+        self._install_tool_setting_resets()
+        self._update_tool_context()
         # The Tools dock controls visibility when a project is open.
 
         scroll = PannableScrollArea()
@@ -4556,6 +4577,7 @@ class MainWindow(QMainWindow):
         if self.canvas.begin_transform(motion=True):
             for name, button in self.tool_buttons.items():
                 button.setChecked(name == 'transform')
+            self._update_tool_context()
             self.return_canvas_focus()
 
     def toggle_tool_options(self):
@@ -4885,6 +4907,66 @@ class MainWindow(QMainWindow):
         self._quick_selection('polygonal' if current == 'freehand' else 'freehand')
         self.status.setText('Selection: ' + self.selection_mode_picker.currentText())
 
+    def _install_tool_setting_resets(self):
+        """Right-click an individual scalar control to restore its factory default."""
+        defaults = {
+            self.spacing_input: 30,
+            self.brush_opacity: 100, self.fill_tolerance_input: 24,
+            self.fill_expansion_input: 2, self.fill_opacity_input: 100,
+        }
+        for name, widget in self.dynamics_controls.items():
+            defaults[widget] = 100 if name == 'pressure_size' else 0
+        defaults[self.size_input] = (
+            48 if self.canvas.tool == 'eraser' else 12)
+        for widget, value in defaults.items():
+            widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            widget.customContextMenuRequested.connect(
+                lambda pos, w=widget, v=value: self._reset_setting_menu(w, pos, v))
+
+    def _default_tool_size(self):
+        if self.canvas.tool == 'eraser':
+            return 48
+        if self.canvas.active_custom_brush is not None:
+            return 48
+        return {'Round': 12, 'Pencil': 9, 'Ink': 6, 'Airbrush': 32}.get(
+            self.canvas.brush_preset, 12)
+
+    def _reset_setting_menu(self, widget, position, default):
+        menu = QMenu(widget)
+        action = menu.addAction('Reset to Default Value')
+        action.triggered.connect(lambda: widget.setValue(
+            self._default_tool_size() if widget is self.size_input else default))
+        menu.exec(widget.mapToGlobal(position))
+
+    def _update_tool_context(self):
+        """Show the existing controls for the current tool, never recreate them.
+
+        Hidden widgets retain their values, signals, and connections to Canvas.
+        The shared diameter input is intentionally used for both brush and eraser.
+        """
+        tool = self.canvas.tool
+        labels = {
+            'brush': 'Brush Settings', 'eraser': 'Eraser Settings',
+            'fill': 'Paint Bucket Settings', 'select': 'Selection Settings',
+            'transform': 'Transform Settings', 'pan': 'Pan Tool',
+            'zoom': 'Zoom Tool', 'rotate': 'Rotate View',
+        }
+        self.tool_context_title.setText(labels.get(tool, 'Tool Settings'))
+        visible = {'shared', 'brush'} if tool == 'brush' else (
+            {'shared'} if tool == 'eraser' else {tool})
+        for section, widget in self.tool_sections.items():
+            widget.setVisible(section in visible)
+        hints = {
+            'pan': 'Drag the canvas to pan. Hold Space for temporary panning.',
+            'zoom': 'Click to zoom in; Alt+click to zoom out. Hold Z and drag.',
+            'rotate': 'Hold R and drag to rotate the view; Ctrl+R resets rotation.',
+        }
+        hint = hints.get(tool, '')
+        self.tool_context_hint.setText(hint)
+        self.tool_context_hint.setVisible(bool(hint))
+        if hasattr(self, 'settings_scroll'):
+            self.settings_scroll.widget().adjustSize()
+
     def set_tool(self, tool):
         old_tool = self.canvas.tool
         if old_tool == 'eraser':
@@ -4902,6 +4984,7 @@ class MainWindow(QMainWindow):
         for name, button in self.tool_buttons.items():
             button.setChecked(name == self.canvas.tool)
         self._refresh_tool_icons()
+        self._update_tool_context()
         self.canvas_scroll.tool_changed()
 
     def adjust_brush(self, offset):

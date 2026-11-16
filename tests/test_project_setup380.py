@@ -1,4 +1,4 @@
-"""v0.38.1 new project conversions, presets, and preferences hooks."""
+"""v0.39.0 new project conversions, presets, and preferences hooks."""
 from pathlib import Path
 import unittest
 from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions
@@ -35,7 +35,7 @@ class ProjectSetupTests(unittest.TestCase):
         for token in ('class NewProjectDialog(QDialog):','def show_preferences(self):',
                       "('a4', 'A4 Portrait", "self.canvas.fps = fps", "self._apply_appearance()",
                       "'appearance/theme'", "'appearance/accent'",'PROJECT_VERSION = 6',
-                      'APP_VERSION = "0.38.1"'):
+                      'APP_VERSION = "0.39.0"'):
             with self.subTest(token=token):self.assertIn(token, SRC if token!="('a4', 'A4 Portrait" else (ROOT/'project_setup.py').read_text(encoding='utf-8'))
 
 try:
