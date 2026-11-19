@@ -1,3 +1,26 @@
+# Linux Animation Studio v0.40.0: Audible Waveform Scrubbing (test candidate)
+
+## New in v0.40.0
+
+- Drag or click the audio waveform to hear short, bounded previews at the selected frame, making dialogue timing and lip sync easier.
+- Previews use the existing Qt media player, respect Mute/Volume, and stop when the pointer is released.
+- Rapid movement limits audio-preview restarts; ordinary Play/Pause/Stop, frame navigation, WAV/MP3 import, and embedded audio remain supported.
+- Timeline mapping now covers the complete frame strip from the waveform's left edge to its right edge.
+- Project format remains `.las` version 6, and the app retains its pre-rebrand Linux Animation Studio name.
+
+## v0.40.0 acceptance focus
+
+1. Import a WAV with clearly spoken numbers or syllables. Drag the waveform slowly; verify audible short samples track the playhead and stop on release.
+2. Repeat with fast dragging, clicks, and a stationary pointer. Ensure there are no overlapping or stuck sounds.
+3. Verify Mute and Volume (including 0%) affect scrub previews, as well as regular playback.
+4. Scrub while playback runs. Check that playback pauses before the gesture, then Play/Pause/Stop still work normally.
+5. Repeat with MP3, short audio, no audio, and playhead positions past the audio's end. Ensure there are no crashes.
+6. Save and reopen the project; verify embedded audio, cels, and timeline still work. Confirm regular audio/video export and document format remain compatible.
+7. Run `python -m unittest discover -s tests -q` and build/launch on Windows, macOS (Sidecar/Apple Pencil), and Linux (Wacom).
+8. This is a **test candidate**. Qt multimedia seeking/decoder responsiveness must be verified on actual hardware before release. On macOS, unsigned builds may require **System Settings → Privacy & Security → Open Anyway**.
+
+---
+
 # Linux Animation Studio v0.39.0: Contextual Tools Panel
 
 ## New in v0.39.0
