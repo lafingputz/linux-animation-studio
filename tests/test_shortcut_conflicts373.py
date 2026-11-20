@@ -1,4 +1,4 @@
-"""v0.39.0 shortcut collision detection and GUI wiring regression checks."""
+"""v0.40.0 shortcut collision detection and GUI wiring regression checks."""
 import unittest
 from pathlib import Path
 from shortcut_conflicts import find_shortcut_conflicts
@@ -27,7 +27,7 @@ class ShortcutConflictTests(unittest.TestCase):
                          "dialog.accept()"):
             with self.subTest(fragment=fragment): self.assertIn(fragment,SRC)
     def test_version(self):
-        self.assertIn('APP_VERSION = "0.39.0"',SRC)
-        self.assertIn("VERSION = '0.39.0'",(ROOT/'tools/package_release.py').read_text(encoding='utf-8'))
+        self.assertIn('APP_VERSION = "0.40.0"',SRC)
+        self.assertIn("VERSION = '0.40.0'",(ROOT/'tools/package_release.py').read_text(encoding='utf-8'))
 
 if __name__=='__main__': unittest.main()
