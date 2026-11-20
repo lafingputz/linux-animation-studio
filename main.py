@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.39.0: contextual tool settings."""
+"""Linux Animation Studio v0.40.0: audible timeline scrubbing."""
 import io
 import wave
 import time
@@ -33,7 +33,7 @@ from shortcut_conflicts import find_shortcut_conflicts
 from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions, resize_linked_dimension
 from appearance_support import resolve_system_theme, windows_apps_use_light_theme
 
-APP_VERSION = "0.39.0"
+APP_VERSION = "0.40.0"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -2782,9 +2782,11 @@ class AudioWaveform(QWidget):
         self.position = 0
         self.setMinimumHeight(42)
         self.setMaximumHeight(58)
-        self.setToolTip('Click or drag to scrub the playhead (audio seeking, not audible shuttle)')
+        self.setToolTip('Drag to scrub the playhead and hear short audio previews')
         self._scrubbing = False
         self.on_seek = None
+        self.on_scrub_start = None
+        self.on_scrub_end = None
 
     def _seek_at(self, event):
         if self.on_seek:
@@ -2793,6 +2795,8 @@ class AudioWaveform(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._scrubbing = True
+            if self.on_scrub_start:
+                self.on_scrub_start()
             self._seek_at(event)
             event.accept()
 
@@ -2807,6 +2811,8 @@ class AudioWaveform(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._scrubbing:
             self._seek_at(event)
             self._scrubbing = False
+            if self.on_scrub_end:
+                self.on_scrub_end()
             event.accept()
         else:
             super().mouseReleaseEvent(event)
@@ -3659,6 +3665,14 @@ class MainWindow(QMainWindow):
         self.audio_player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.audio_player.setAudioOutput(self.audio_output)
+        # Short, bounded audio previews while dragging the waveform. Reuse the
+        # existing media player so normal playback and timeline seeking share
+        # one decoder; never play audio continuously after the gesture ends.
+        self._audio_scrubbing = False
+        self._last_scrub_preview = 0.0
+        self.scrub_preview_timer = QTimer(self)
+        self.scrub_preview_timer.setSingleShot(True)
+        self.scrub_preview_timer.timeout.connect(self._stop_scrub_preview)
         self.audio_temp = tempfile.TemporaryDirectory(prefix='las-audio-')
         self.audio_mute = False
         self.focus_mode = False
@@ -4136,6 +4150,8 @@ class MainWindow(QMainWindow):
         audio_page_layout.addLayout(audio_controls)
         self.audio_wave = AudioWaveform()
         self.audio_wave.on_seek = self.seek_audio_fraction
+        self.audio_wave.on_scrub_start = self._begin_audio_scrub
+        self.audio_wave.on_scrub_end = self._end_audio_scrub
         motion_controls = QHBoxLayout()
         self.motion_create = QPushButton('Make Motion Object from Layer')
         self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
@@ -4525,6 +4541,7 @@ class MainWindow(QMainWindow):
         self.canvas._mark_dirty()
 
     def toggle_playback(self):
+        self._end_audio_scrub()
         if self.canvas.playing:
             self.pause_playback()
             return
@@ -6406,6 +6423,7 @@ class MainWindow(QMainWindow):
         return self._save_to(self.project_path) if self.project_path else self.save_project_as()
 
     def _reset_audio(self):
+        self._end_audio_scrub()
         self.audio_player.stop()
         self.audio_player.setSource(QUrl())
         self.canvas.audio_bytes = None
@@ -6417,6 +6435,7 @@ class MainWindow(QMainWindow):
         self.audio_label.setText('No audio imported')
 
     def _reload_audio(self):
+        self._end_audio_scrub()
         self.audio_player.stop()
         self.audio_player.setSource(QUrl())
         data = getattr(self.canvas, 'audio_bytes', None)
@@ -6466,16 +6485,61 @@ class MainWindow(QMainWindow):
     def set_audio_mute(self, checked):
         self.audio_output.setMuted(bool(checked))
 
+    def _begin_audio_scrub(self):
+        if self.canvas.playing:
+            self.pause_playback()
+        self._audio_scrubbing = True
+        self._last_scrub_preview = 0.0
+        self.scrub_preview_timer.stop()
+        self.audio_player.pause()
+
+    def _stop_scrub_preview(self):
+        # A single-shot timer bounds each snippet, even when the pen stops.
+        if self._audio_scrubbing and not self.canvas.playing:
+            self.audio_player.pause()
+
+    def _end_audio_scrub(self):
+        self._audio_scrubbing = False
+        self.scrub_preview_timer.stop()
+        if not self.canvas.playing:
+            self.audio_player.pause()
+
+    def _preview_scrub_audio(self):
+        if not self._audio_scrubbing or self.canvas.playing:
+            return
+        if not getattr(self.canvas, 'audio_bytes', None):
+            return
+        if self.audio_output.isMuted() or self.audio_output.volume() <= 0:
+            return
+        # Limit decoder restarts during rapid pen movement. Seeking still
+        # follows every frame change; the audio snippet is retriggered at
+        # most once every 80 ms and stops after 140 ms without a new trigger.
+        now = time.monotonic()
+        if now - self._last_scrub_preview < 0.08:
+            return
+        self._last_scrub_preview = now
+        self.audio_player.play()
+        self.scrub_preview_timer.start(140)
+
     def seek_audio_fraction(self, fraction):
+        if not self.project_active or not self.canvas.frames:
+            return
         count = len(self.canvas.frames)
-        frame = min(count-1, round(fraction * count))
+        frame = min(count - 1, round(max(0., min(1., fraction)) * (count - 1)))
+        previous = self.canvas.frame_index
         self.canvas.change_frame(frame)
+        # Clicking the current frame should still produce an audible preview.
+        if frame == previous and self._audio_scrubbing:
+            self.audio_player.setPosition(round(frame * 1000 / self.canvas.fps))
+            self._preview_scrub_audio()
 
     def _audio_frame_update(self, index):
         self.audio_wave.position = index / max(1, len(self.canvas.frames) - 1)
         self.audio_wave.update()
         if not self.canvas.playing and getattr(self.canvas, 'audio_bytes', None):
             self.audio_player.setPosition(round(index * 1000 / self.canvas.fps))
+            if self._audio_scrubbing:
+                self._preview_scrub_audio()
 
     def import_image_layer(self):
         if not self.project_active:
@@ -6652,6 +6716,7 @@ class MainWindow(QMainWindow):
             progress.close()
 
     def closeEvent(self, event):
+        self._end_audio_scrub()
         self.pause_playback()
         if self._confirm_discard():
             if self.focus_mode:
