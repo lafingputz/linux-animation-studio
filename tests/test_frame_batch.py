@@ -51,6 +51,16 @@ class FakeCanvas:
         pass
 
 class MultiFrameTests(unittest.TestCase):
+    def test_timeline_disables_visual_only_thumbnail_dragging(self):
+        # IconMode must be set before explicitly disabling icon movement.
+        start = source.index('self.frame_list.setViewMode(QListWidget.ViewMode.IconMode)')
+        end = source.index('self.frame_list.setFlow(', start)
+        setup = source[start:end]
+        for expected in ('setMovement(QListWidget.Movement.Static)',
+                         'setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)',
+                         'setDragEnabled(False)', 'setAcceptDrops(False)'):
+            self.assertIn(expected, setup)
+
     def test_insertion_undo_redo_shifts_motion_keys_once(self):
         c = FakeCanvas()
         self.assertTrue(c.add_multiple_blank_frames(2))
