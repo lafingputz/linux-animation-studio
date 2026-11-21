@@ -51,6 +51,24 @@ class FakeCanvas:
         pass
 
 class MultiFrameTests(unittest.TestCase):
+    def test_playhead_refresh_preserves_native_selection(self):
+        window = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'MainWindow')
+        method = next(n for n in window.body if isinstance(n, ast.FunctionDef) and n.name == 'refresh_playhead')
+        ns = {}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), '<playhead-test>', 'exec'), ns)
+        from unittest.mock import Mock
+        ui = Mock()
+        ui.canvas.frames = [None] * 5
+        ui.frame_list.currentRow.return_value = 3
+        ns['refresh_playhead'](ui, 3)
+        ui.frame_list.setCurrentRow.assert_not_called()
+        ui.frame_list.blockSignals.assert_not_called()
+        ui._timeline_selection_changed.assert_not_called()
+        ui._audio_frame_update.assert_called_once_with(3)
+        ns['refresh_playhead'](ui, 1)
+        ui.frame_list.setCurrentRow.assert_called_once_with(1)
+        ui._timeline_selection_changed.assert_called_once_with()
+
     def test_timeline_disables_visual_only_thumbnail_dragging(self):
         # IconMode must be set before explicitly disabling icon movement.
         start = source.index('self.frame_list.setViewMode(QListWidget.ViewMode.IconMode)')
