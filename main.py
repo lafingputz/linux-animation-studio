@@ -4183,6 +4183,12 @@ class MainWindow(QMainWindow):
         self.frame_list.on_exposure_drag = self.drag_exposure
         self.frame_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.frame_list.setViewMode(QListWidget.ViewMode.IconMode)
+        # IconMode defaults to movable icons; frame order belongs to the document.
+        # Keep native selection and custom exposure grips, not free icon dragging.
+        self.frame_list.setMovement(QListWidget.Movement.Static)
+        self.frame_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.frame_list.setDragEnabled(False)
+        self.frame_list.setAcceptDrops(False)
         self.frame_list.setFlow(QListWidget.Flow.LeftToRight)
         self.frame_list.setWrapping(False)
         self.frame_list.setIconSize(__import__('PySide6.QtCore',fromlist=['QSize']).QSize(90,60))
