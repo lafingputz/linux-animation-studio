@@ -5595,9 +5595,13 @@ class MainWindow(QMainWindow):
 
     def refresh_playhead(self, index):
         self._audio_frame_update(index)
-        self.frame_list.blockSignals(True)
-        self.frame_list.setCurrentRow(index)
-        self.frame_list.blockSignals(False)
+        # A native Ctrl/Shift click already moved the current row. Re-selecting
+        # it during currentRowChanged clears Qt's extended selection.
+        if self.frame_list.currentRow() != index:
+            self.frame_list.blockSignals(True)
+            self.frame_list.setCurrentRow(index)
+            self.frame_list.blockSignals(False)
+            self._timeline_selection_changed()
         self.frame_label.setText(f'Frame {index + 1} / {len(self.canvas.frames)}')
         self.frame_jump.blockSignals(True)
         self.frame_jump.setRange(1, len(self.canvas.frames))
