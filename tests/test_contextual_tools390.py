@@ -10,7 +10,11 @@ class ContextualToolsSourceTests(unittest.TestCase):
     def test_existing_widgets_are_grouped_without_recreation_on_switch(self):
         window = SOURCE[SOURCE.index('class MainWindow(QMainWindow):'):]
         section = window[window.index("self.tool_sections = {}"):window.index('settings_scroll = QScrollArea()')]
-        self.assertIn("section_layouts['fill'].addWidget(self.fill_tolerance_input)",section)
+        self.assertIn("section_layouts['fill'].addWidget(self._slider_row(self.fill_tolerance_input))", section)
+        slider_factory = window[window.index('def _slider_row('):window.index('def _populate_audio_menu(')]
+        self.assertIn('layout.addWidget(spin)', slider_factory)
+        self.assertIn('slider.valueChanged.connect(spin.setValue)', slider_factory)
+        self.assertIn('spin.valueChanged.connect(slider.setValue)', slider_factory)
         self.assertIn("section_layouts['brush'].addWidget(self.brush_select)",section)
         self.assertIn("section_layouts['select'].addWidget(self.selection_mode_picker)",section)
         self.assertIn("section_layouts['shared'].addLayout(size_row)",section)
