@@ -941,7 +941,8 @@ class Canvas(QWidget):
         pressure = max(0.0, min(1.0, pressure))
         if self._multi_stroke_before is not None and not getattr(self, '_replaying_multi_stroke', False):
             self._multi_stroke_samples.append((QPointF(point), pressure, tablet))
-        width = self.size * (0.15 + 0.85 * pressure) if tablet else self.size
+        strength = self.brush_settings[self.brush_preset].get('pressure_size', 100) / 100.0 if self.tool == 'brush' else 1.0
+        width = self.size * (1.0 - 0.85 * strength * (1.0 - pressure)) if tablet else self.size
         self._include_point(point, width)
         if self.last is not None:
             self._include_point(self.last, self.size)
@@ -965,6 +966,8 @@ class Canvas(QWidget):
         else:
             preset = self.brush_preset
             opacity = self.brush_settings[preset]['opacity'] / 100.0
+            if tablet:
+                opacity *= 1.0 - self.brush_settings[preset].get('pressure_opacity', 0) / 100.0 * (1.0 - pressure)
             if preset == 'Airbrush':
                 # A soft radial alpha stamp, spaced along the line for smooth movement.
                 dx = point.x() - self.last.x() if self.last is not None else 0.0
@@ -3839,7 +3842,7 @@ class MainWindow(QMainWindow):
         self.spacing_input.valueChanged.connect(self.change_custom_spacing)
         section_layouts['brush'].addWidget(QLabel('Stamp spacing (% of diameter)'))
         section_layouts['brush'].addWidget(self._slider_row(self.spacing_input))
-        section_layouts['brush'].addWidget(QLabel('Custom brush dynamics'))
+        section_layouts['brush'].addWidget(QLabel('Brush dynamics (rotation/scatter: custom tips only)'))
         self.follow_direction = QCheckBox('Rotate along stroke')
         self.follow_direction.toggled.connect(lambda v: self.change_custom_dynamic('follow_direction', v))
         section_layouts['brush'].addWidget(self.follow_direction)
@@ -3851,6 +3854,7 @@ class MainWindow(QMainWindow):
             section_layouts['brush'].addWidget(QLabel(title))
             widget = QSpinBox()
             widget.setRange(0, maximum)
+            widget.setValue(100 if key == 'pressure_size' else 0)
             widget.valueChanged.connect(lambda value, k=key: self.change_custom_dynamic(k, value))
             section_layouts['brush'].addWidget(self._slider_row(widget))
             self.dynamics_controls[key] = widget
@@ -4172,6 +4176,12 @@ class MainWindow(QMainWindow):
         self.audio_wave.on_seek = self.seek_audio_fraction
         self.audio_wave.on_scrub_start = self._begin_audio_scrub
         self.audio_wave.on_scrub_end = self._end_audio_scrub
+        for widget, default in ((self.opacity_input, 100), (self.fps_input, 12),
+                                (self.frame_jump, 1), (self.hold_length, 3),
+                                (self.onion_spin, 35), (self.onion_previous_input, 1),
+                                (self.onion_next_input, 1), (self.audio_volume, 100),
+                                (self.audio_gain, 100)):
+            self._install_numeric_reset(widget, default)
         motion_controls = QHBoxLayout()
         self.motion_create = QPushButton('Make Motion Object from Layer')
         self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
@@ -4493,6 +4503,7 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         slider = QSlider(Qt.Orientation.Horizontal, row)
+        spin._paired_slider = slider
         slider.setRange(spin.minimum(), spin.maximum())
         slider.setSingleStep(spin.singleStep())
         slider.setValue(spin.value())
@@ -5048,9 +5059,22 @@ class MainWindow(QMainWindow):
         defaults[self.size_input] = (
             48 if self.canvas.tool == 'eraser' else 12)
         for widget, value in defaults.items():
-            widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            widget.customContextMenuRequested.connect(
-                lambda pos, w=widget, v=value: self._reset_setting_menu(w, pos, v))
+            self._install_numeric_reset(widget, value)
+
+    def _install_numeric_reset(self, widget, default):
+        widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        widget.customContextMenuRequested.connect(
+            lambda pos, w=widget, v=default: self._reset_setting_menu(w, pos, v))
+        # The spin box editor and slider handle can receive context clicks directly.
+        editor = widget.lineEdit()
+        editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        editor.customContextMenuRequested.connect(
+            lambda pos: self._reset_setting_menu(widget, widget.mapFromGlobal(editor.mapToGlobal(pos)), default))
+        slider = getattr(widget, '_paired_slider', None)
+        if slider is not None:
+            slider.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            slider.customContextMenuRequested.connect(
+                lambda pos: self._reset_setting_menu(widget, widget.mapFromGlobal(slider.mapToGlobal(pos)), default))
 
     def _default_tool_size(self):
         if self.canvas.tool == 'eraser':
@@ -6003,6 +6027,8 @@ class MainWindow(QMainWindow):
                 widget.blockSignals(True)
                 widget.setValue(brush[key])
                 widget.blockSignals(False)
+        else:
+            self._sync_builtin_pressure_controls()
         self.update_custom_preview()
         self.canvas._stamp_cache.clear()
         self.set_tool('brush')
@@ -6015,6 +6041,16 @@ class MainWindow(QMainWindow):
             brush[key] = value
             save_custom_brush(ident, brush)
             self.update_custom_preview()
+        elif key in ('pressure_size', 'pressure_opacity'):
+            self.canvas.brush_settings[self.canvas.brush_preset][key] = value
+
+    def _sync_builtin_pressure_controls(self):
+        settings = self.canvas.brush_settings[self.canvas.brush_preset]
+        for key, default in (('pressure_size', 100), ('pressure_opacity', 0)):
+            widget = self.dynamics_controls[key]
+            widget.blockSignals(True)
+            widget.setValue(settings.get(key, default))
+            widget.blockSignals(False)
 
     def update_custom_preview(self):
         ident = self.canvas.active_custom_brush
@@ -6114,6 +6150,7 @@ class MainWindow(QMainWindow):
             self.canvas._stamp_cache.clear()
             self.update_custom_preview()
         settings = self.canvas.brush_settings[name]
+        self._sync_builtin_pressure_controls()
         self.size_input.blockSignals(True)
         self.size_input.setValue(self.canvas.eraser_size if self.canvas.tool == 'eraser' else settings['size'])
         self.size_input.blockSignals(False)
