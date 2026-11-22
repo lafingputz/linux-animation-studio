@@ -24,7 +24,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout, QStyle,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout, QStyle, QSlider,
 )
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
@@ -2779,6 +2779,7 @@ class AudioWaveform(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.peaks = []
+        self.display_gain = 100
         self.position = 0
         self.setMinimumHeight(42)
         self.setMaximumHeight(58)
@@ -2825,7 +2826,7 @@ class AudioWaveform(QWidget):
             mid, amp = self.height() / 2, self.height() * .44
             for i, peak in enumerate(self.peaks):
                 x = round(i * (self.width() - 1) / max(1, len(self.peaks) - 1))
-                height = max(1, peak * amp)
+                height = min(amp, max(0, peak * amp * self.display_gain / 100))
                 painter.drawLine(QPointF(x, mid-height), QPointF(x, mid+height))
         painter.setPen(QPen(QColor('#f4bc66'), 2))
         x = round(self.position * max(1, self.width() - 1))
@@ -3811,7 +3812,7 @@ class MainWindow(QMainWindow):
         self.size_input.setSuffix(' px')
         self.size_input.valueChanged.connect(self.change_size)
         self.size_input.editingFinished.connect(self.return_canvas_focus)
-        size_row.addWidget(self.size_input)
+        size_row.addWidget(self._slider_row(self.size_input))
         section_layouts['shared'].addLayout(size_row)
         section_layouts['brush'].addWidget(QLabel('Brush preset'))
         self.brush_select = QComboBox()
@@ -3837,7 +3838,7 @@ class MainWindow(QMainWindow):
         self.spacing_input.setValue(30)
         self.spacing_input.valueChanged.connect(self.change_custom_spacing)
         section_layouts['brush'].addWidget(QLabel('Stamp spacing (% of diameter)'))
-        section_layouts['brush'].addWidget(self.spacing_input)
+        section_layouts['brush'].addWidget(self._slider_row(self.spacing_input))
         section_layouts['brush'].addWidget(QLabel('Custom brush dynamics'))
         self.follow_direction = QCheckBox('Rotate along stroke')
         self.follow_direction.toggled.connect(lambda v: self.change_custom_dynamic('follow_direction', v))
@@ -3851,7 +3852,7 @@ class MainWindow(QMainWindow):
             widget = QSpinBox()
             widget.setRange(0, maximum)
             widget.valueChanged.connect(lambda value, k=key: self.change_custom_dynamic(k, value))
-            section_layouts['brush'].addWidget(widget)
+            section_layouts['brush'].addWidget(self._slider_row(widget))
             self.dynamics_controls[key] = widget
         self.custom_preview = QLabel('Brush preview')
         self.custom_preview.setMinimumHeight(75)
@@ -3867,7 +3868,7 @@ class MainWindow(QMainWindow):
         self.brush_opacity.setValue(100)
         self.brush_opacity.valueChanged.connect(self.change_brush_opacity)
         self.brush_opacity.editingFinished.connect(self.return_canvas_focus)
-        section_layouts['brush'].addWidget(self.brush_opacity)
+        section_layouts['brush'].addWidget(self._slider_row(self.brush_opacity))
         section_layouts['fill'].addWidget(QLabel('Paint Bucket / Flood Fill'))
         self.fill_tolerance_input = QSpinBox()
         self.fill_tolerance_input.setRange(0, 255)
@@ -3876,7 +3877,7 @@ class MainWindow(QMainWindow):
         self.fill_tolerance_input.valueChanged.connect(lambda value: setattr(self.canvas, 'fill_tolerance', value))
         self.fill_tolerance_input.editingFinished.connect(self.return_canvas_focus)
         section_layouts['fill'].addWidget(QLabel('Fill tolerance'))
-        section_layouts['fill'].addWidget(self.fill_tolerance_input)
+        section_layouts['fill'].addWidget(self._slider_row(self.fill_tolerance_input))
         section_layouts['fill'].addWidget(QLabel('Fill expansion (pixels)'))
         self.fill_expansion_input = QSpinBox()
         self.fill_expansion_input.setRange(0, 10)
@@ -3887,7 +3888,7 @@ class MainWindow(QMainWindow):
         self.fill_expansion_input.valueChanged.connect(
             lambda value: setattr(self.canvas, 'fill_expansion', value))
         self.fill_expansion_input.editingFinished.connect(self.return_canvas_focus)
-        section_layouts['fill'].addWidget(self.fill_expansion_input)
+        section_layouts['fill'].addWidget(self._slider_row(self.fill_expansion_input))
         self.fill_edge_aware_check = QCheckBox('Respect stroke edges (conservative)')
         self.fill_edge_aware_check.setChecked(self.canvas.fill_edge_aware)
         self.fill_edge_aware_check.setToolTip(
@@ -3904,7 +3905,7 @@ class MainWindow(QMainWindow):
         self.fill_opacity_input.valueChanged.connect(
             lambda value: setattr(self.canvas, 'fill_opacity', value))
         self.fill_opacity_input.editingFinished.connect(self.return_canvas_focus)
-        section_layouts['fill'].addWidget(self.fill_opacity_input)
+        section_layouts['fill'].addWidget(self._slider_row(self.fill_opacity_input))
         self.fill_contiguous_check = QCheckBox('Contiguous (connected area only)')
         self.fill_contiguous_check.setChecked(True)
         self.fill_contiguous_check.toggled.connect(lambda checked: setattr(self.canvas, 'fill_contiguous', checked))
@@ -3983,7 +3984,7 @@ class MainWindow(QMainWindow):
         self.opacity_input.setValue(100)
         self.opacity_input.valueChanged.connect(self.canvas.set_opacity)
         self.opacity_input.editingFinished.connect(self.return_canvas_focus)
-        right.addWidget(self.opacity_input)
+        right.addWidget(self._slider_row(self.opacity_input))
         self.right_panel = QWidget()
         self.right_panel.setLayout(right)
         # The Layers dock controls visibility when a project is open.
@@ -4057,7 +4058,7 @@ class MainWindow(QMainWindow):
         self.fps_input.setRange(1, 60)
         self.fps_input.setValue(12)
         self.fps_input.valueChanged.connect(self.change_fps)
-        frame_controls.addWidget(self.fps_input)
+        frame_controls.addWidget(self._slider_row(self.fps_input))
         self.frame_label = QLabel('Frame 1 / 1')
         frame_controls.addWidget(self.frame_label)
         frame_controls.addWidget(QLabel('Go to:'))
@@ -4116,7 +4117,7 @@ class MainWindow(QMainWindow):
         self.onion_spin.setValue(35)
         self.onion_spin.valueChanged.connect(self.set_onion_opacity)
         self.onion_spin.editingFinished.connect(self.return_canvas_focus)
-        play_controls.addWidget(self.onion_spin)
+        play_controls.addWidget(self._slider_row(self.onion_spin))
         play_controls.addStretch()
         timeline.addLayout(play_controls)
         ranges = QHBoxLayout()
@@ -4147,8 +4148,27 @@ class MainWindow(QMainWindow):
         self.audio_volume.setRange(0, 100)
         self.audio_volume.setValue(100)
         self.audio_volume.valueChanged.connect(lambda v: self.audio_output.setVolume(v / 100))
+        audio_controls.addWidget(self.audio_import_button)
+        audio_controls.addWidget(self.audio_remove_button)
+        audio_controls.addWidget(self.audio_mute_checkbox)
         audio_page_layout.addLayout(audio_controls)
+        audio_page_layout.addWidget(QLabel('Playback volume'))
+        audio_page_layout.addWidget(self._slider_row(self.audio_volume))
         self.audio_wave = AudioWaveform()
+        self.audio_wave.display_gain = max(10, min(1000, self.preferences.value('audio/display_gain', 100, type=int)))
+        self.audio_gain = QSpinBox()
+        self.audio_gain.setRange(10, 1000)
+        self.audio_gain.setSuffix(' %')
+        self.audio_gain.setValue(self.audio_wave.display_gain)
+        self.audio_gain.valueChanged.connect(self._set_waveform_gain)
+        audio_page_layout.addWidget(QLabel('Waveform display gain (visual only)'))
+        audio_page_layout.addWidget(self._slider_row(self.audio_gain))
+        self.audio_scrub_enabled = QCheckBox('Audible scrubbing')
+        self.audio_scrub_enabled.setChecked(self.preferences.value('audio/audible_scrub', True, type=bool))
+        self.audio_scrub_enabled.toggled.connect(self._set_audible_scrub)
+        audio_page_layout.addWidget(self.audio_scrub_enabled)
+        self.audio_wave.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.audio_wave.customContextMenuRequested.connect(self._audio_context_menu)
         self.audio_wave.on_seek = self.seek_audio_fraction
         self.audio_wave.on_scrub_start = self._begin_audio_scrub
         self.audio_wave.on_scrub_end = self._end_audio_scrub
@@ -4300,6 +4320,9 @@ class MainWindow(QMainWindow):
         preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         # Key dispatch is owned by the customizable Preferences QShortcut.
         self._build_animation_menu()
+        self.audio_menu = self.menuBar().addMenu('&Audio')
+        self.audio_menu.aboutToShow.connect(lambda: self._populate_audio_menu(self.audio_menu))
+        self._populate_audio_menu(self.audio_menu)
         viewmenu = self.menuBar().addMenu('&View')
         self._reset_rotation_action = viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
         viewmenu.addSeparator()
@@ -4405,14 +4428,6 @@ class MainWindow(QMainWindow):
         self.multi_edit_checkbox.toggled.connect(multi.setChecked)
         onions = menu.addMenu('Onion Skins')
         onions.addAction('Set Previous / Next Ghost Ranges…', self.set_ghost_ranges_dialog)
-        audio = menu.addMenu('Audio')
-        audio.addAction('Import Audio WAV/MP3…', self.import_audio)
-        audio.addAction('Remove Audio', self.remove_audio)
-        mute = audio.addAction('Mute Audio')
-        mute.setCheckable(True)
-        mute.toggled.connect(self.audio_mute_checkbox.setChecked)
-        self.audio_mute_checkbox.toggled.connect(mute.setChecked)
-        audio.addAction('Volume…', self.set_audio_volume_dialog)
         motion = menu.addMenu('Motion Objects')
         motion.addAction('Create from Layer', self.create_motion_object)
         motion.addAction('Set Keyframe', self.set_motion_keyframe)
@@ -4471,11 +4486,102 @@ class MainWindow(QMainWindow):
             self.onion_previous_input.setValue(previous)
             self.onion_next_input.setValue(following)
 
+    def _slider_row(self, spin):
+        # Keep the original numeric input as the source of truth. A paint-time
+        # sync also covers programmatic updates made with blocked spin signals.
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        slider = QSlider(Qt.Orientation.Horizontal, row)
+        slider.setRange(spin.minimum(), spin.maximum())
+        slider.setSingleStep(spin.singleStep())
+        slider.setValue(spin.value())
+        slider.setMinimumHeight(30)
+        slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        slider.setStyleSheet('QSlider::handle:horizontal { width: 20px; height: 20px; margin: -7px 0; } QSlider::groove:horizontal { height: 6px; }')
+        slider.valueChanged.connect(spin.setValue)
+        spin.valueChanged.connect(slider.setValue)
+        # QSpinBox signals may be blocked by existing refresh code. Synchronize
+        # on paint without emitting slider changes back into the document.
+        class SyncSliderFilter(__import__('PySide6.QtCore', fromlist=['QObject']).QObject):
+            def eventFilter(self, watched, event):
+                if event.type() in (QEvent.Type.Paint, QEvent.Type.Show, QEvent.Type.EnabledChange):
+                    old = slider.blockSignals(True)
+                    slider.setRange(spin.minimum(), spin.maximum())
+                    slider.setValue(spin.value())
+                    slider.setEnabled(spin.isEnabled())
+                    slider.blockSignals(old)
+                return False
+        sync = SyncSliderFilter(slider)
+        spin.installEventFilter(sync)
+        slider.installEventFilter(sync)
+        layout.addWidget(slider, 1)
+        layout.addWidget(spin)
+        return row
+
+    def _populate_audio_menu(self, menu):
+        menu.clear()
+        has_audio = bool(getattr(self.canvas, 'audio_bytes', None))
+        menu.addAction('Replace Audio…' if has_audio else 'Import Audio WAV/MP3…', self.import_audio).setEnabled(self.project_active)
+        menu.addAction('Remove Audio', self.remove_audio).setEnabled(has_audio)
+        menu.addSeparator()
+        mute = menu.addAction('Mute Audio')
+        mute.setCheckable(True)
+        mute.setChecked(self.audio_mute_checkbox.isChecked())
+        mute.toggled.connect(self.audio_mute_checkbox.setChecked)
+        menu.addAction('Volume…', self.set_audio_volume_dialog)
+        scrub = menu.addAction('Audible Scrubbing')
+        scrub.setCheckable(True)
+        scrub.setChecked(self.audio_scrub_enabled.isChecked())
+        scrub.toggled.connect(self.audio_scrub_enabled.setChecked)
+        menu.addSeparator()
+        menu.addAction('Waveform Display Gain…', self._waveform_gain_dialog)
+        menu.addAction('Increase Waveform Height', lambda: self.audio_gain.setValue(round(self.audio_gain.value() * 1.25)))
+        menu.addAction('Decrease Waveform Height', lambda: self.audio_gain.setValue(round(self.audio_gain.value() / 1.25)))
+        menu.addAction('Auto-fit Waveform', self._auto_fit_waveform).setEnabled(bool(self.audio_wave.peaks))
+        menu.addAction('Reset Waveform Scale', lambda: self.audio_gain.setValue(100))
+
+    def _audio_context_menu(self, pos):
+        menu = QMenu(self.audio_wave)
+        self._populate_audio_menu(menu)
+        menu.exec(self.audio_wave.mapToGlobal(pos))
+
+    def _set_waveform_gain(self, value):
+        self.audio_wave.display_gain = value
+        self.audio_wave.update()
+        self.preferences.setValue('audio/display_gain', value)
+
+    def _auto_fit_waveform(self):
+        peak = max(self.audio_wave.peaks, default=0)
+        self.audio_gain.setValue(round(100 / peak) if peak > 0 else 100)
+
+    def _set_audible_scrub(self, enabled):
+        self.preferences.setValue('audio/audible_scrub', enabled)
+        if not enabled:
+            self._stop_scrub_preview()
+            self.scrub_preview_timer.stop()
+
+    def _audio_scalar_dialog(self, title, target):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        spin = QSpinBox()
+        spin.setRange(target.minimum(), target.maximum())
+        spin.setSuffix(' %')
+        spin.setValue(target.value())
+        layout.addWidget(self._slider_row(spin))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            target.setValue(spin.value())
+
     def set_audio_volume_dialog(self):
-        volume, ok = QInputDialog.getInt(self, 'Audio Volume', 'Volume (%):',
-                                          self.audio_volume.value(), 0, 100)
-        if ok:
-            self.audio_volume.setValue(volume)
+        self._audio_scalar_dialog('Audio Volume', self.audio_volume)
+
+    def _waveform_gain_dialog(self):
+        self._audio_scalar_dialog('Waveform Display Gain (visual only)', self.audio_gain)
 
     def create_motion_object(self):
         try:
@@ -6095,6 +6201,7 @@ class MainWindow(QMainWindow):
         self.timeline_toggle.setVisible(False)
         self.workspace_picker.setEnabled(active)
         self.animation_menu.setEnabled(active)
+        self.audio_menu.setEnabled(active)
         if active:
             # Each workspace remembers its own layout, with Drawing initially
             # timeline-free and Animation initially timeline-visible.
@@ -6518,6 +6625,8 @@ class MainWindow(QMainWindow):
         if not self._audio_scrubbing or self.canvas.playing:
             return
         if not getattr(self.canvas, 'audio_bytes', None):
+            return
+        if not self.audio_scrub_enabled.isChecked():
             return
         if self.audio_output.isMuted() or self.audio_output.volume() <= 0:
             return
