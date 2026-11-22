@@ -18,8 +18,8 @@ from bisect import bisect_left
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QPointingDevice, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QAction, QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
+from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
+from PySide6.QtGui import QAction, QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient, QPointingDevice
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
