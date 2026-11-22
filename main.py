@@ -18,7 +18,7 @@ from bisect import bisect_left
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
+from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QPointingDevice, QTimer, QElapsedTimer, Qt, Signal, QUrl
 from PySide6.QtGui import QAction, QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
@@ -229,6 +229,8 @@ class Canvas(QWidget):
     frames_changed = Signal()
     playhead_changed = Signal(int)
     motion_changed = Signal()
+    sampled_color = Signal(QColor)
+    tablet_eraser_changed = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -255,7 +257,9 @@ class Canvas(QWidget):
         self.eraser_size = 48
         self.zoom = 1.0
         self.rotation = 0.0  # View-only degrees; never written to project frames.
-        self.tool = 'brush'  # brush, eraser, fill, select, transform, pan, zoom, rotate
+        self.tool = 'brush'  # brush, eraser, fill, eyedropper, select, transform, pan, zoom, rotate
+        self.eyedropper_source = 'visible'
+        self._tablet_eraser_active = False
         self.fill_tolerance = 24
         self.fill_expansion = 2
         self.fill_edge_aware = True
@@ -348,7 +352,9 @@ class Canvas(QWidget):
 
     def _enforce_cursor(self):
         # Transform uses the standard OS arrow; other tools draw canvas overlays.
-        if self.tool == 'fill':
+        if self.tool == 'eyedropper':
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif self.tool == 'fill':
             # Do not hide the pointer for bucket mode: a true OS cursor stays
             # legible when Qt is busy performing a large fill.
             if not hasattr(self, '_bucket_cursor'):
@@ -482,6 +488,32 @@ class Canvas(QWidget):
         self.draw_motion_objects(painter, self.frame_index)
         painter.end()
         return image
+
+    def sample_document_color(self, position):
+        """Read document pixels, not overlays or the white canvas preview."""
+        x, y = int(math.floor(position.x())), int(math.floor(position.y()))
+        if not (0 <= x < self.width_px and 0 <= y < self.height_px):
+            return False
+        image = (self.active_layer().image if self.eyedropper_source == 'active' and self.active_layer()
+                 else self.composite())
+        color = image.pixelColor(x, y)
+        if color.alpha() == 0:
+            self.diagnostic.emit('Eyedropper: transparent pixel; drawing color unchanged.')
+            return False
+        self.color = QColor(color)
+        self._stamp_cache.clear()
+        self.sampled_color.emit(QColor(color))
+        self.diagnostic.emit(f'Eyedropper: {color.name(QColor.NameFormat.HexArgb).upper()}')
+        return True
+
+    def _tablet_pointer_eraser(self, device):
+        return bool(device is not None and device.pointerType() == QPointingDevice.PointerType.Eraser)
+
+    def _sync_tablet_eraser(self, device):
+        eraser = self._tablet_pointer_eraser(device)
+        if eraser != self._tablet_eraser_active and not self.drawing and self.drag_origin is None and self.transform_drag is None:
+            self._tablet_eraser_active = eraser
+            self.tablet_eraser_changed.emit(eraser)
 
     def _tinted_neighbor(self, index, tint):
         # Compositing is read-only; onion skins never touch underlying layer images.
@@ -1686,6 +1718,7 @@ class Canvas(QWidget):
         pressure = float(event.pressure())
         device = event.pointingDevice()
         name = device.name() if device else 'Unknown tablet'
+        self._sync_tablet_eraser(device)
         # A Wacom side button can produce tablet presses even while the nib is
         # hovering. Only the primary nib/button is allowed to paint or fill.
         # Qt may subsequently synthesize a mouse event for the same gesture.
@@ -1721,7 +1754,9 @@ class Canvas(QWidget):
             return
         if typ == QEvent.Type.TabletPress:
             self.ignore_mouse = True
-            if self.tool == 'fill':
+            if self.tool == 'eyedropper':
+                self.sample_document_color(self.widget_to_document(event.position()))
+            elif self.tool == 'fill':
                 self.flood_fill(self.widget_to_document(event.position()))
             elif self.tool in ("brush", "eraser"):
                 self._begin_stroke('tablet')
@@ -1767,7 +1802,9 @@ class Canvas(QWidget):
         self.show_hover(self.widget_to_document(event.position()), 1.0)
         if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
                 and not (event.buttons() & Qt.MouseButton.RightButton)):
-            if self.tool == 'fill':
+            if self.tool == 'eyedropper':
+                self.sample_document_color(self.widget_to_document(event.position()))
+            elif self.tool == 'fill':
                 self.flood_fill(self.widget_to_document(event.position()))
             elif self.tool in ('brush', 'eraser'):
                 self._begin_stroke('mouse')
@@ -3697,6 +3734,10 @@ class MainWindow(QMainWindow):
         self.status = QLabel('Wacom stylus ready | Select a tool and draw.')
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.canvas.diagnostic.connect(self.status.setText)
+        self.canvas.sampled_color.connect(self.update_color_swatch)
+        self.canvas.tablet_eraser_changed.connect(self._tablet_eraser_transition)
+        self._tablet_previous_tool = None
+        self._tablet_switch_in_progress = False
         self.canvas.dirty_changed.connect(self.refresh_title)
         self.canvas.document_changed.connect(self.refresh_layers)
         self.canvas.canvas_context_requested.connect(self._canvas_context_menu)
@@ -3728,6 +3769,7 @@ class MainWindow(QMainWindow):
             ('brush', '🖌', 'Brush: click to draw, arrow for brush presets'),
             ('eraser', '⌫', 'Eraser: click to erase, arrow for size presets'),
             ('fill', '🪣', 'Paint Bucket: click to fill an enclosed area (G)'),
+            ('eyedropper', '⌖', 'Eyedropper: sample the canvas color (I)'),
             ('select', '▱', 'Selection: arrow for rectangle / lassos'),
             ('transform', '➤', 'Transform / move selection or active cel'),
             ('pan', '✋', 'Pan canvas'),
@@ -3777,7 +3819,7 @@ class MainWindow(QMainWindow):
         left.addWidget(self.tool_context_title)
         self.tool_sections = {}
         section_layouts = {}
-        for section in ('shared', 'brush', 'fill', 'select', 'transform'):
+        for section in ('shared', 'brush', 'fill', 'eyedropper', 'select', 'transform'):
             panel = QWidget(left_panel)
             panel.setObjectName('LASToolSection_' + section)
             layout = QVBoxLayout(panel)
@@ -3796,6 +3838,13 @@ class MainWindow(QMainWindow):
         self.selection_mode_picker.currentIndexChanged.connect(self._selection_mode_changed)
         section_layouts['select'].addWidget(QLabel('Selection mode'))
         section_layouts['select'].addWidget(self.selection_mode_picker)
+        section_layouts['eyedropper'].addWidget(QLabel('Sample color from'))
+        self.eyedropper_source_picker = QComboBox()
+        self.eyedropper_source_picker.addItem('All visible artwork', 'visible')
+        self.eyedropper_source_picker.addItem('Active layer only', 'active')
+        self.eyedropper_source_picker.currentIndexChanged.connect(
+            lambda i: setattr(self.canvas, 'eyedropper_source', self.eyedropper_source_picker.itemData(i)))
+        section_layouts['eyedropper'].addWidget(self.eyedropper_source_picker)
         transform_buttons = QHBoxLayout()
         apply_button = QPushButton('Apply Transform')
         apply_button.clicked.connect(lambda: self.canvas.apply_transform(keep_selection=False))
@@ -4364,6 +4413,7 @@ class MainWindow(QMainWindow):
             ('Cycle Brush Presets', 'Shift+B', self._cycle_brush_preset),
             ('Eraser Tool', 'E', lambda: self._tool_shortcut('eraser')),
             ('Paint Bucket Tool', 'G', lambda: self._tool_shortcut('fill')),
+            ('Eyedropper Tool', 'I', lambda: self._tool_shortcut('eyedropper')),
             ('Rectangle Marquee', 'M', lambda: self._tool_shortcut('select', 'rectangle')),
             ('Freehand Lasso', 'L', lambda: self._tool_shortcut('select', 'freehand')),
             ('Cycle Lasso Tools', 'Shift+L', self._cycle_lasso),
@@ -5100,7 +5150,7 @@ class MainWindow(QMainWindow):
         tool = self.canvas.tool
         labels = {
             'brush': 'Brush Settings', 'eraser': 'Eraser Settings',
-            'fill': 'Paint Bucket Settings', 'select': 'Selection Settings',
+            'fill': 'Paint Bucket Settings', 'eyedropper': 'Eyedropper Settings', 'select': 'Selection Settings',
             'transform': 'Transform Settings', 'pan': 'Pan Tool',
             'zoom': 'Zoom Tool', 'rotate': 'Rotate View',
         }
@@ -5120,7 +5170,30 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'settings_scroll'):
             self.settings_scroll.widget().adjustSize()
 
+    def _tablet_eraser_transition(self, eraser):
+        """Switch tools on Qt tablet pointer changes, never mid-stroke."""
+        if not self.project_active or self.canvas.drawing:
+            return
+        self._tablet_switch_in_progress = True
+        try:
+            if eraser:
+                self._tablet_previous_tool = self.canvas.tool
+                if self.canvas.tool != 'eraser':
+                    self.set_tool('eraser')
+            else:
+                previous = self._tablet_previous_tool
+                self._tablet_previous_tool = None
+                if previous is not None and self.canvas.tool == 'eraser':
+                    self.set_tool(previous)
+        finally:
+            self._tablet_switch_in_progress = False
+
     def set_tool(self, tool):
+        if self.canvas._tablet_eraser_active and not self._tablet_switch_in_progress:
+            # A manual tool choice while the pen is flipped becomes the tool
+            # to restore when its nib returns.
+            self._tablet_previous_tool = tool
+            return
         old_tool = self.canvas.tool
         if old_tool == 'eraser':
             self.canvas.eraser_size = self.canvas.size
@@ -6239,6 +6312,9 @@ class MainWindow(QMainWindow):
         self.workspace_picker.setEnabled(active)
         self.animation_menu.setEnabled(active)
         self.audio_menu.setEnabled(active)
+        if not active:
+            self._tablet_previous_tool = None
+            self.canvas._tablet_eraser_active = False
         if active:
             # Each workspace remembers its own layout, with Drawing initially
             # timeline-free and Animation initially timeline-visible.
