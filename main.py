@@ -6073,7 +6073,13 @@ class MainWindow(QMainWindow):
         def clear_active_menu():
             # Even an editable bucket spin box can leave this popup open.
             # Closing it without choosing an action arms one non-drawing click.
-            if (not chosen_action[0] and not self.canvas._dismiss_canvas_menu_mouse_down
+            if sys.platform.startswith('linux'):
+                # On Qt/Wayland the popup consumes the outside click before
+                # aboutToHide runs. Re-arming here would suppress the *next*
+                # intentional canvas click, forcing a third click to draw.
+                # The flag was already armed while the menu was visible.
+                self.canvas._dismiss_canvas_menu_press = False
+            elif (not chosen_action[0] and not self.canvas._dismiss_canvas_menu_mouse_down
                     and not self.canvas._dismiss_canvas_menu_tablet_down):
                 self.canvas._dismiss_canvas_menu_press = True
             # Dismissing with a canvas click must not leave a gesture open.
