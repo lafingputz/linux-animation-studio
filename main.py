@@ -6041,7 +6041,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         self._active_canvas_menu = menu
         # No canvas click should draw/fill while a context menu is open.
-        self.canvas._dismiss_canvas_menu_press = False
+        self.canvas._dismiss_canvas_menu_press = True
         chosen_action = [False]
         def action_chosen(_action):
             chosen_action[0] = True
@@ -6050,7 +6050,8 @@ class MainWindow(QMainWindow):
         def clear_active_menu():
             # Even an editable bucket spin box can leave this popup open.
             # Closing it without choosing an action arms one non-drawing click.
-            if not chosen_action[0]:
+            if (not chosen_action[0] and not self.canvas._dismiss_canvas_menu_mouse_down
+                    and not self.canvas._dismiss_canvas_menu_tablet_down):
                 self.canvas._dismiss_canvas_menu_press = True
             # Dismissing with a canvas click must not leave a gesture open.
             if self.canvas.drawing and self.canvas.input_kind == 'mouse':
