@@ -623,7 +623,7 @@ class Canvas(QWidget):
         if self.hover_position is not None and not self.playing:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             center = self.hover_position
-            if self.tool in ('brush', 'eraser', 'fill'):
+            if self.tool in ('brush', 'eraser'):
                 diameter = self.size if self.tool == 'eraser' else self.size * (0.15 + 0.85 * self.hover_pressure)
                 r = max(0.5, diameter / 2.0)
                 p.setBrush(Qt.BrushStyle.NoBrush)
@@ -1725,9 +1725,14 @@ class Canvas(QWidget):
         name = device.name() if device else 'Unknown tablet'
         self._sync_tablet_eraser(device)
         if self._dismiss_canvas_menu_tablet_down:
-            if typ == QEvent.Type.TabletRelease:
+            # Qt may deliver no TabletRelease when a popup eats the tap.
+            # An unpressed hover/move means that gesture has ended.
+            if (typ == QEvent.Type.TabletRelease or
+                    (typ == QEvent.Type.TabletMove and
+                     not (event.buttons() & Qt.MouseButton.LeftButton))):
                 self._dismiss_canvas_menu_tablet_down = False
                 self.ignore_mouse = False
+                self.show_hover(self.widget_to_document(event.position()), 1.0)
             event.accept()
             return
         if (typ == QEvent.Type.TabletPress and self._dismiss_canvas_menu_press
@@ -1856,6 +1861,11 @@ class Canvas(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._dismiss_canvas_menu_mouse_down:
+            # A menu can swallow the release that ends its dismissal click.
+            # Don't strand the gesture or suppress the painted brush cursor.
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._dismiss_canvas_menu_mouse_down = False
+                self.show_hover(self.widget_to_document(event.position()), 1.0)
             event.accept()
             return
         if not self.ignore_mouse:
@@ -6026,6 +6036,17 @@ class MainWindow(QMainWindow):
         delete.setEnabled(len(self.canvas.layers) > 1)
         menu.exec(self.layers_list.viewport().mapToGlobal(pos))
 
+    def _restore_canvas_hover_after_menu(self):
+        if not self.project_active or not self.canvas.isVisible():
+            return
+        self.canvas.refresh_cursor()
+        local = self.canvas.mapFromGlobal(QCursor.pos())
+        if self.canvas.rect().contains(local):
+            self.canvas.show_hover(self.canvas.widget_to_document(QPointF(local)), 1.0)
+        else:
+            self.canvas.hover_position = None
+            self.canvas.update()
+
     def _canvas_context_menu(self, global_pos):
         if not self.project_active:
             return
@@ -6061,6 +6082,10 @@ class MainWindow(QMainWindow):
             if self._active_canvas_menu is menu:
                 self._active_canvas_menu = None
             menu.deleteLater()
+            # Qt popup grabs may skip the canvas Enter/Move event on dismissal.
+            # Restore the correct OS cursor and on-canvas brush hover after
+            # the popup is actually gone, without synthesizing a click.
+            QTimer.singleShot(0, self._restore_canvas_hover_after_menu)
         menu.aboutToHide.connect(clear_active_menu)
         if tool == 'brush':
             menu.addAction('Brush Library…', lambda: self._open_brush_library(False))
