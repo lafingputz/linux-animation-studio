@@ -1800,6 +1800,7 @@ class Canvas(QWidget):
         # the last tablet event came from the pen's physical eraser end.
         # Ignore Qt's synthesized mouse events while a tablet stroke is active.
         if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
+                and event.source() == Qt.MouseEventSource.MouseEventNotSynthesized
                 and self._tablet_eraser_active):
             self._tablet_eraser_active = False
             self.tablet_eraser_changed.emit(False)
