@@ -59,7 +59,7 @@ class Flood341Tests(unittest.TestCase):
         ast.parse(source)
         for expected in ("APP_VERSION = \"0.40.0\"", "def draw_bucket_glyph(",
                          "def bucket_cursor():", "return QCursor(pix, 8, 35)",
-                         "if self.tool == 'fill':", "for tool in ('brush', 'eraser', 'fill', 'select'):"):
+                         "if self.tool == 'fill':", "for tool in ('brush', 'eraser', 'fill', 'eyedropper', 'select'):"):
             self.assertIn(expected, source)
 
     def test_benchmark_is_present(self):
