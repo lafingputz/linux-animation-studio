@@ -1808,6 +1808,11 @@ class Canvas(QWidget):
             event.accept()
             return
         self.show_hover(self.widget_to_document(event.position()), 1.0)
+        # A popup can consume the release for the click that dismissed it.
+        # Never attach a fresh mouse press to the unfinished previous stroke.
+        if (self.drawing and self.input_kind == 'mouse'
+                and event.button() == Qt.MouseButton.LeftButton):
+            self._end_stroke()
         if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
                 and not (event.buttons() & Qt.MouseButton.RightButton)):
             if self.tool == 'eyedropper':
@@ -1825,6 +1830,11 @@ class Canvas(QWidget):
     def mouseMoveEvent(self, event):
         if not self.ignore_mouse:
             self.show_hover(self.widget_to_document(event.position()), 1.0)
+        # Qt popups can swallow a mouse release. Close that gesture as soon
+        # as an ordinary move reports the left button is no longer down.
+        if (self.drawing and self.input_kind == 'mouse'
+                and not (event.buttons() & Qt.MouseButton.LeftButton)):
+            self._end_stroke()
         if (not self.ignore_mouse and self.drawing and self.input_kind == 'mouse'
                 and event.buttons() & Qt.MouseButton.LeftButton
                 and not event.buttons() & Qt.MouseButton.RightButton):
@@ -5992,9 +6002,15 @@ class MainWindow(QMainWindow):
         active_menu = getattr(self, '_active_canvas_menu', None)
         if active_menu is not None and active_menu.isVisible():
             return
+        # The context-menu gesture never extends a brush/eraser stroke.
+        if self.canvas.drawing and self.canvas.input_kind == 'mouse':
+            self.canvas._end_stroke()
         menu = QMenu(self)
         self._active_canvas_menu = menu
         def clear_active_menu():
+            # Dismissing with a canvas click must not leave a gesture open.
+            if self.canvas.drawing and self.canvas.input_kind == 'mouse':
+                self.canvas._end_stroke()
             if self._active_canvas_menu is menu:
                 self._active_canvas_menu = None
             menu.deleteLater()
