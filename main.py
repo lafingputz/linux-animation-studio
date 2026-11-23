@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.40.0: audible timeline scrubbing."""
+"""Linux Animation Studio v0.41.0-rc.1: interface and drawing refinements."""
 import io
 import wave
 import time
@@ -33,7 +33,7 @@ from shortcut_conflicts import find_shortcut_conflicts
 from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions, resize_linked_dimension
 from appearance_support import resolve_system_theme, windows_apps_use_light_theme
 
-APP_VERSION = "0.40.0"
+APP_VERSION = "0.41.0-rc.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
