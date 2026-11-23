@@ -1,4 +1,4 @@
-"""Qt-independent regression checks for the v0.40.0 contextual Tools dock."""
+"""Qt-independent regression checks for the v0.41.0-rc.1 contextual Tools dock."""
 import ast
 import unittest
 from pathlib import Path
@@ -37,8 +37,8 @@ class ContextualToolsSourceTests(unittest.TestCase):
         self.assertIn("defaults[widget] = 100 if name == 'pressure_size' else 0",SOURCE)
 
     def test_no_document_format_bump(self):
-        self.assertIn('APP_VERSION = "0.40.0"',SOURCE)
+        self.assertIn('APP_VERSION = "0.41.0-rc.1"',SOURCE)
         self.assertIn('PROJECT_VERSION = 6',SOURCE)
-        self.assertIn("VERSION = '0.40.0'",(ROOT/'tools/package_release.py').read_text(encoding='utf-8'))
+        self.assertIn("VERSION = '0.41.0-rc.1'",(ROOT/'tools/package_release.py').read_text(encoding='utf-8'))
 
 if __name__ == '__main__': unittest.main()
