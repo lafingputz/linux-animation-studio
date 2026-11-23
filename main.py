@@ -1730,7 +1730,9 @@ class Canvas(QWidget):
                 self.ignore_mouse = False
             event.accept()
             return
-        if typ == QEvent.Type.TabletPress and self._dismiss_canvas_menu_press:
+        if (typ == QEvent.Type.TabletPress and self._dismiss_canvas_menu_press
+                and event.button() != Qt.MouseButton.RightButton
+                and not (event.buttons() & Qt.MouseButton.RightButton)):
             self._dismiss_canvas_menu_press = False
             self._dismiss_canvas_menu_tablet_down = True
             self.ignore_mouse = True
