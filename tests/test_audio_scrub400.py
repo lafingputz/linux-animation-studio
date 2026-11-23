@@ -1,4 +1,4 @@
-"""Regression checks for v0.40.0 audible timeline scrubbing.
+"""Regression checks for v0.41.0-rc.1 audible timeline scrubbing.
 
 These source-level checks run without audio hardware. Native manual tests are
 still required because QMediaPlayer backends behave differently across OSes.
@@ -43,7 +43,7 @@ class AudibleScrubTests(unittest.TestCase):
         self.assertIn("def _reload_audio(self):\n        self._end_audio_scrub()", SOURCE)
 
     def test_project_format_unchanged(self):
-        self.assertIn('APP_VERSION = "0.40.0"', SOURCE)
+        self.assertIn('APP_VERSION = "0.41.0-rc.1"', SOURCE)
         self.assertIn("PROJECT_VERSION = 6", SOURCE)
 
 
