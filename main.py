@@ -1,4 +1,4 @@
-"""Linux Animation Studio v0.40.0: audible timeline scrubbing."""
+"""Linux Animation Studio v0.41.0-rc.1: interface and drawing refinements."""
 import io
 import wave
 import time
@@ -19,12 +19,12 @@ from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import qVersion, QSettings, QStandardPaths, QCoreApplication, QEvent, QPoint, QPointF, QRect, QRectF, QTimer, QElapsedTimer, Qt, Signal, QUrl
-from PySide6.QtGui import QAction, QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient
+from PySide6.QtGui import QAction, QPalette, QDesktopServices, QColor, QImage, QKeySequence, QPainter, QPen, QShortcut, QRadialGradient, QTransform, QPixmap, QPainterPath, QPolygonF, QIcon, QCursor, QLinearGradient, QPointingDevice
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtWidgets import (
     QApplication, QAbstractSpinBox, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractItemView, QColorDialog, QFileDialog, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout, QStyle,
+    QVBoxLayout, QWidget, QInputDialog, QSpinBox, QSplitter, QDockWidget, QSizePolicy, QDoubleSpinBox, QToolButton, QButtonGroup, QFrame, QCheckBox, QProgressDialog, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QMenu, QGridLayout, QStyle, QSlider,
 )
 
 from feedback_support import feedback_url, normalize_repository, read_packaged_repository, support_diagnostics
@@ -33,7 +33,7 @@ from shortcut_conflicts import find_shortcut_conflicts
 from project_setup import PROJECT_PRESETS, preset_dimensions, pixels_to_unit, unit_to_pixels, validate_project_dimensions, resize_linked_dimension
 from appearance_support import resolve_system_theme, windows_apps_use_light_theme
 
-APP_VERSION = "0.40.0"
+APP_VERSION = "0.41.0-rc.1"
 WIDTH, HEIGHT = 1200, 800
 IMAGE_FORMAT = QImage.Format.Format_ARGB32_Premultiplied
 PROJECT_VERSION = 6
@@ -229,6 +229,8 @@ class Canvas(QWidget):
     frames_changed = Signal()
     playhead_changed = Signal(int)
     motion_changed = Signal()
+    sampled_color = Signal(QColor)
+    tablet_eraser_changed = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -255,7 +257,9 @@ class Canvas(QWidget):
         self.eraser_size = 48
         self.zoom = 1.0
         self.rotation = 0.0  # View-only degrees; never written to project frames.
-        self.tool = 'brush'  # brush, eraser, fill, select, transform, pan, zoom, rotate
+        self.tool = 'brush'  # brush, eraser, fill, eyedropper, select, transform, pan, zoom, rotate
+        self.eyedropper_source = 'visible'
+        self._tablet_eraser_active = False
         self.fill_tolerance = 24
         self.fill_expansion = 2
         self.fill_edge_aware = True
@@ -284,6 +288,11 @@ class Canvas(QWidget):
         self.ignore_mouse = False
         self._secondary_tablet_down = False
         self._secondary_context_suppress_until = 0.0
+        # Popup dismissal is not a drawing/fill action. The next canvas press
+        # is consumed unless the menu was closed by choosing an action.
+        self._dismiss_canvas_menu_press = False
+        self._dismiss_canvas_menu_mouse_down = False
+        self._dismiss_canvas_menu_tablet_down = False
         self.hover_position = None
         self.hover_pressure = 1.0
         self._before_stroke = None
@@ -348,7 +357,9 @@ class Canvas(QWidget):
 
     def _enforce_cursor(self):
         # Transform uses the standard OS arrow; other tools draw canvas overlays.
-        if self.tool == 'fill':
+        if self.tool == 'eyedropper':
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif self.tool == 'fill':
             # Do not hide the pointer for bucket mode: a true OS cursor stays
             # legible when Qt is busy performing a large fill.
             if not hasattr(self, '_bucket_cursor'):
@@ -483,6 +494,32 @@ class Canvas(QWidget):
         painter.end()
         return image
 
+    def sample_document_color(self, position):
+        """Read document pixels, not overlays or the white canvas preview."""
+        x, y = int(math.floor(position.x())), int(math.floor(position.y()))
+        if not (0 <= x < self.width_px and 0 <= y < self.height_px):
+            return False
+        image = (self.active_layer().image if self.eyedropper_source == 'active' and self.active_layer()
+                 else self.composite())
+        color = image.pixelColor(x, y)
+        if color.alpha() == 0:
+            self.diagnostic.emit('Eyedropper: transparent pixel; drawing color unchanged.')
+            return False
+        self.color = QColor(color)
+        self._stamp_cache.clear()
+        self.sampled_color.emit(QColor(color))
+        self.diagnostic.emit(f'Eyedropper: {color.name(QColor.NameFormat.HexArgb).upper()}')
+        return True
+
+    def _tablet_pointer_eraser(self, device):
+        return bool(device is not None and device.pointerType() == QPointingDevice.PointerType.Eraser)
+
+    def _sync_tablet_eraser(self, device):
+        eraser = self._tablet_pointer_eraser(device)
+        if eraser != self._tablet_eraser_active and not self.drawing and self.drag_origin is None and self.transform_drag is None:
+            self._tablet_eraser_active = eraser
+            self.tablet_eraser_changed.emit(eraser)
+
     def _tinted_neighbor(self, index, tint):
         # Compositing is read-only; onion skins never touch underlying layer images.
         if not 0 <= index < len(self.frames):
@@ -586,7 +623,7 @@ class Canvas(QWidget):
         if self.hover_position is not None and not self.playing:
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             center = self.hover_position
-            if self.tool in ('brush', 'eraser', 'fill'):
+            if self.tool in ('brush', 'eraser'):
                 diameter = self.size if self.tool == 'eraser' else self.size * (0.15 + 0.85 * self.hover_pressure)
                 r = max(0.5, diameter / 2.0)
                 p.setBrush(Qt.BrushStyle.NoBrush)
@@ -941,7 +978,8 @@ class Canvas(QWidget):
         pressure = max(0.0, min(1.0, pressure))
         if self._multi_stroke_before is not None and not getattr(self, '_replaying_multi_stroke', False):
             self._multi_stroke_samples.append((QPointF(point), pressure, tablet))
-        width = self.size * (0.15 + 0.85 * pressure) if tablet else self.size
+        strength = self.brush_settings[self.brush_preset].get('pressure_size', 100) / 100.0 if self.tool == 'brush' else 1.0
+        width = self.size * (1.0 - 0.85 * strength * (1.0 - pressure)) if tablet else self.size
         self._include_point(point, width)
         if self.last is not None:
             self._include_point(self.last, self.size)
@@ -965,6 +1003,8 @@ class Canvas(QWidget):
         else:
             preset = self.brush_preset
             opacity = self.brush_settings[preset]['opacity'] / 100.0
+            if tablet:
+                opacity *= 1.0 - self.brush_settings[preset].get('pressure_opacity', 0) / 100.0 * (1.0 - pressure)
             if preset == 'Airbrush':
                 # A soft radial alpha stamp, spaced along the line for smooth movement.
                 dx = point.x() - self.last.x() if self.last is not None else 0.0
@@ -1683,6 +1723,26 @@ class Canvas(QWidget):
         pressure = float(event.pressure())
         device = event.pointingDevice()
         name = device.name() if device else 'Unknown tablet'
+        self._sync_tablet_eraser(device)
+        if self._dismiss_canvas_menu_tablet_down:
+            # Qt may deliver no TabletRelease when a popup eats the tap.
+            # An unpressed hover/move means that gesture has ended.
+            if (typ == QEvent.Type.TabletRelease or
+                    (typ == QEvent.Type.TabletMove and
+                     not (event.buttons() & Qt.MouseButton.LeftButton))):
+                self._dismiss_canvas_menu_tablet_down = False
+                self.ignore_mouse = False
+                self.show_hover(self.widget_to_document(event.position()), 1.0)
+            event.accept()
+            return
+        if (typ == QEvent.Type.TabletPress and self._dismiss_canvas_menu_press
+                and event.button() != Qt.MouseButton.RightButton
+                and not (event.buttons() & Qt.MouseButton.RightButton)):
+            self._dismiss_canvas_menu_press = False
+            self._dismiss_canvas_menu_tablet_down = True
+            self.ignore_mouse = True
+            event.accept()
+            return
         # A Wacom side button can produce tablet presses even while the nib is
         # hovering. Only the primary nib/button is allowed to paint or fill.
         # Qt may subsequently synthesize a mouse event for the same gesture.
@@ -1718,7 +1778,9 @@ class Canvas(QWidget):
             return
         if typ == QEvent.Type.TabletPress:
             self.ignore_mouse = True
-            if self.tool == 'fill':
+            if self.tool == 'eyedropper':
+                self.sample_document_color(self.widget_to_document(event.position()))
+            elif self.tool == 'fill':
                 self.flood_fill(self.widget_to_document(event.position()))
             elif self.tool in ("brush", "eraser"):
                 self._begin_stroke('tablet')
@@ -1758,13 +1820,36 @@ class Canvas(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if self._dismiss_canvas_menu_press and event.button() == Qt.MouseButton.LeftButton:
+            self._dismiss_canvas_menu_press = False
+            self._dismiss_canvas_menu_mouse_down = True
+            event.accept()
+            return
+        if self._dismiss_canvas_menu_mouse_down:
+            event.accept()
+            return
+        # A genuine mouse press must be able to draw immediately, even when
+        # the last tablet event came from the pen's physical eraser end.
+        # Ignore Qt's synthesized mouse events while a tablet stroke is active.
+        if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
+                and event.source() == Qt.MouseEventSource.MouseEventNotSynthesized
+                and self._tablet_eraser_active):
+            self._tablet_eraser_active = False
+            self.tablet_eraser_changed.emit(False)
         if self.playing:
             event.accept()
             return
         self.show_hover(self.widget_to_document(event.position()), 1.0)
+        # A popup can consume the release for the click that dismissed it.
+        # Never attach a fresh mouse press to the unfinished previous stroke.
+        if (self.drawing and self.input_kind == 'mouse'
+                and event.button() == Qt.MouseButton.LeftButton):
+            self._end_stroke()
         if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
                 and not (event.buttons() & Qt.MouseButton.RightButton)):
-            if self.tool == 'fill':
+            if self.tool == 'eyedropper':
+                self.sample_document_color(self.widget_to_document(event.position()))
+            elif self.tool == 'fill':
                 self.flood_fill(self.widget_to_document(event.position()))
             elif self.tool in ('brush', 'eraser'):
                 self._begin_stroke('mouse')
@@ -1775,8 +1860,21 @@ class Canvas(QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event):
+        if self._dismiss_canvas_menu_mouse_down:
+            # A menu can swallow the release that ends its dismissal click.
+            # Don't strand the gesture or suppress the painted brush cursor.
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._dismiss_canvas_menu_mouse_down = False
+                self.show_hover(self.widget_to_document(event.position()), 1.0)
+            event.accept()
+            return
         if not self.ignore_mouse:
             self.show_hover(self.widget_to_document(event.position()), 1.0)
+        # Qt popups can swallow a mouse release. Close that gesture as soon
+        # as an ordinary move reports the left button is no longer down.
+        if (self.drawing and self.input_kind == 'mouse'
+                and not (event.buttons() & Qt.MouseButton.LeftButton)):
+            self._end_stroke()
         if (not self.ignore_mouse and self.drawing and self.input_kind == 'mouse'
                 and event.buttons() & Qt.MouseButton.LeftButton
                 and not event.buttons() & Qt.MouseButton.RightButton):
@@ -1786,6 +1884,11 @@ class Canvas(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        if self._dismiss_canvas_menu_mouse_down:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._dismiss_canvas_menu_mouse_down = False
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.input_kind == 'mouse':
                 self._end_stroke()
@@ -2779,6 +2882,7 @@ class AudioWaveform(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.peaks = []
+        self.display_gain = 100
         self.position = 0
         self.setMinimumHeight(42)
         self.setMaximumHeight(58)
@@ -2825,7 +2929,7 @@ class AudioWaveform(QWidget):
             mid, amp = self.height() / 2, self.height() * .44
             for i, peak in enumerate(self.peaks):
                 x = round(i * (self.width() - 1) / max(1, len(self.peaks) - 1))
-                height = max(1, peak * amp)
+                height = min(amp, max(0, peak * amp * self.display_gain / 100))
                 painter.drawLine(QPointF(x, mid-height), QPointF(x, mid+height))
         painter.setPen(QPen(QColor('#f4bc66'), 2))
         x = round(self.position * max(1, self.width() - 1))
@@ -3693,6 +3797,10 @@ class MainWindow(QMainWindow):
         self.status = QLabel('Wacom stylus ready | Select a tool and draw.')
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.canvas.diagnostic.connect(self.status.setText)
+        self.canvas.sampled_color.connect(self.update_color_swatch)
+        self.canvas.tablet_eraser_changed.connect(self._tablet_eraser_transition)
+        self._tablet_previous_tool = None
+        self._tablet_switch_in_progress = False
         self.canvas.dirty_changed.connect(self.refresh_title)
         self.canvas.document_changed.connect(self.refresh_layers)
         self.canvas.canvas_context_requested.connect(self._canvas_context_menu)
@@ -3724,6 +3832,7 @@ class MainWindow(QMainWindow):
             ('brush', '🖌', 'Brush: click to draw, arrow for brush presets'),
             ('eraser', '⌫', 'Eraser: click to erase, arrow for size presets'),
             ('fill', '🪣', 'Paint Bucket: click to fill an enclosed area (G)'),
+            ('eyedropper', '⌖', 'Eyedropper: sample the canvas color (I)'),
             ('select', '▱', 'Selection: arrow for rectangle / lassos'),
             ('transform', '➤', 'Transform / move selection or active cel'),
             ('pan', '✋', 'Pan canvas'),
@@ -3773,7 +3882,7 @@ class MainWindow(QMainWindow):
         left.addWidget(self.tool_context_title)
         self.tool_sections = {}
         section_layouts = {}
-        for section in ('shared', 'brush', 'fill', 'select', 'transform'):
+        for section in ('shared', 'brush', 'fill', 'eyedropper', 'select', 'transform'):
             panel = QWidget(left_panel)
             panel.setObjectName('LASToolSection_' + section)
             layout = QVBoxLayout(panel)
@@ -3792,6 +3901,13 @@ class MainWindow(QMainWindow):
         self.selection_mode_picker.currentIndexChanged.connect(self._selection_mode_changed)
         section_layouts['select'].addWidget(QLabel('Selection mode'))
         section_layouts['select'].addWidget(self.selection_mode_picker)
+        section_layouts['eyedropper'].addWidget(QLabel('Sample color from'))
+        self.eyedropper_source_picker = QComboBox()
+        self.eyedropper_source_picker.addItem('All visible artwork', 'visible')
+        self.eyedropper_source_picker.addItem('Active layer only', 'active')
+        self.eyedropper_source_picker.currentIndexChanged.connect(
+            lambda i: setattr(self.canvas, 'eyedropper_source', self.eyedropper_source_picker.itemData(i)))
+        section_layouts['eyedropper'].addWidget(self.eyedropper_source_picker)
         transform_buttons = QHBoxLayout()
         apply_button = QPushButton('Apply Transform')
         apply_button.clicked.connect(lambda: self.canvas.apply_transform(keep_selection=False))
@@ -3811,7 +3927,7 @@ class MainWindow(QMainWindow):
         self.size_input.setSuffix(' px')
         self.size_input.valueChanged.connect(self.change_size)
         self.size_input.editingFinished.connect(self.return_canvas_focus)
-        size_row.addWidget(self.size_input)
+        size_row.addWidget(self._slider_row(self.size_input))
         section_layouts['shared'].addLayout(size_row)
         section_layouts['brush'].addWidget(QLabel('Brush preset'))
         self.brush_select = QComboBox()
@@ -3837,8 +3953,8 @@ class MainWindow(QMainWindow):
         self.spacing_input.setValue(30)
         self.spacing_input.valueChanged.connect(self.change_custom_spacing)
         section_layouts['brush'].addWidget(QLabel('Stamp spacing (% of diameter)'))
-        section_layouts['brush'].addWidget(self.spacing_input)
-        section_layouts['brush'].addWidget(QLabel('Custom brush dynamics'))
+        section_layouts['brush'].addWidget(self._slider_row(self.spacing_input))
+        section_layouts['brush'].addWidget(QLabel('Brush dynamics (rotation/scatter: custom tips only)'))
         self.follow_direction = QCheckBox('Rotate along stroke')
         self.follow_direction.toggled.connect(lambda v: self.change_custom_dynamic('follow_direction', v))
         section_layouts['brush'].addWidget(self.follow_direction)
@@ -3850,8 +3966,9 @@ class MainWindow(QMainWindow):
             section_layouts['brush'].addWidget(QLabel(title))
             widget = QSpinBox()
             widget.setRange(0, maximum)
+            widget.setValue(100 if key == 'pressure_size' else 0)
             widget.valueChanged.connect(lambda value, k=key: self.change_custom_dynamic(k, value))
-            section_layouts['brush'].addWidget(widget)
+            section_layouts['brush'].addWidget(self._slider_row(widget))
             self.dynamics_controls[key] = widget
         self.custom_preview = QLabel('Brush preview')
         self.custom_preview.setMinimumHeight(75)
@@ -3867,7 +3984,7 @@ class MainWindow(QMainWindow):
         self.brush_opacity.setValue(100)
         self.brush_opacity.valueChanged.connect(self.change_brush_opacity)
         self.brush_opacity.editingFinished.connect(self.return_canvas_focus)
-        section_layouts['brush'].addWidget(self.brush_opacity)
+        section_layouts['brush'].addWidget(self._slider_row(self.brush_opacity))
         section_layouts['fill'].addWidget(QLabel('Paint Bucket / Flood Fill'))
         self.fill_tolerance_input = QSpinBox()
         self.fill_tolerance_input.setRange(0, 255)
@@ -3876,7 +3993,7 @@ class MainWindow(QMainWindow):
         self.fill_tolerance_input.valueChanged.connect(lambda value: setattr(self.canvas, 'fill_tolerance', value))
         self.fill_tolerance_input.editingFinished.connect(self.return_canvas_focus)
         section_layouts['fill'].addWidget(QLabel('Fill tolerance'))
-        section_layouts['fill'].addWidget(self.fill_tolerance_input)
+        section_layouts['fill'].addWidget(self._slider_row(self.fill_tolerance_input))
         section_layouts['fill'].addWidget(QLabel('Fill expansion (pixels)'))
         self.fill_expansion_input = QSpinBox()
         self.fill_expansion_input.setRange(0, 10)
@@ -3887,7 +4004,7 @@ class MainWindow(QMainWindow):
         self.fill_expansion_input.valueChanged.connect(
             lambda value: setattr(self.canvas, 'fill_expansion', value))
         self.fill_expansion_input.editingFinished.connect(self.return_canvas_focus)
-        section_layouts['fill'].addWidget(self.fill_expansion_input)
+        section_layouts['fill'].addWidget(self._slider_row(self.fill_expansion_input))
         self.fill_edge_aware_check = QCheckBox('Respect stroke edges (conservative)')
         self.fill_edge_aware_check.setChecked(self.canvas.fill_edge_aware)
         self.fill_edge_aware_check.setToolTip(
@@ -3904,7 +4021,7 @@ class MainWindow(QMainWindow):
         self.fill_opacity_input.valueChanged.connect(
             lambda value: setattr(self.canvas, 'fill_opacity', value))
         self.fill_opacity_input.editingFinished.connect(self.return_canvas_focus)
-        section_layouts['fill'].addWidget(self.fill_opacity_input)
+        section_layouts['fill'].addWidget(self._slider_row(self.fill_opacity_input))
         self.fill_contiguous_check = QCheckBox('Contiguous (connected area only)')
         self.fill_contiguous_check.setChecked(True)
         self.fill_contiguous_check.toggled.connect(lambda checked: setattr(self.canvas, 'fill_contiguous', checked))
@@ -3983,7 +4100,7 @@ class MainWindow(QMainWindow):
         self.opacity_input.setValue(100)
         self.opacity_input.valueChanged.connect(self.canvas.set_opacity)
         self.opacity_input.editingFinished.connect(self.return_canvas_focus)
-        right.addWidget(self.opacity_input)
+        right.addWidget(self._slider_row(self.opacity_input))
         self.right_panel = QWidget()
         self.right_panel.setLayout(right)
         # The Layers dock controls visibility when a project is open.
@@ -4057,7 +4174,7 @@ class MainWindow(QMainWindow):
         self.fps_input.setRange(1, 60)
         self.fps_input.setValue(12)
         self.fps_input.valueChanged.connect(self.change_fps)
-        frame_controls.addWidget(self.fps_input)
+        frame_controls.addWidget(self._slider_row(self.fps_input))
         self.frame_label = QLabel('Frame 1 / 1')
         frame_controls.addWidget(self.frame_label)
         frame_controls.addWidget(QLabel('Go to:'))
@@ -4116,7 +4233,7 @@ class MainWindow(QMainWindow):
         self.onion_spin.setValue(35)
         self.onion_spin.valueChanged.connect(self.set_onion_opacity)
         self.onion_spin.editingFinished.connect(self.return_canvas_focus)
-        play_controls.addWidget(self.onion_spin)
+        play_controls.addWidget(self._slider_row(self.onion_spin))
         play_controls.addStretch()
         timeline.addLayout(play_controls)
         ranges = QHBoxLayout()
@@ -4147,11 +4264,36 @@ class MainWindow(QMainWindow):
         self.audio_volume.setRange(0, 100)
         self.audio_volume.setValue(100)
         self.audio_volume.valueChanged.connect(lambda v: self.audio_output.setVolume(v / 100))
+        audio_controls.addWidget(self.audio_import_button)
+        audio_controls.addWidget(self.audio_remove_button)
+        audio_controls.addWidget(self.audio_mute_checkbox)
         audio_page_layout.addLayout(audio_controls)
+        audio_page_layout.addWidget(QLabel('Playback volume'))
+        audio_page_layout.addWidget(self._slider_row(self.audio_volume))
         self.audio_wave = AudioWaveform()
+        self.audio_wave.display_gain = max(10, min(1000, self.preferences.value('audio/display_gain', 100, type=int)))
+        self.audio_gain = QSpinBox()
+        self.audio_gain.setRange(10, 1000)
+        self.audio_gain.setSuffix(' %')
+        self.audio_gain.setValue(self.audio_wave.display_gain)
+        self.audio_gain.valueChanged.connect(self._set_waveform_gain)
+        audio_page_layout.addWidget(QLabel('Waveform display gain (visual only)'))
+        audio_page_layout.addWidget(self._slider_row(self.audio_gain))
+        self.audio_scrub_enabled = QCheckBox('Audible scrubbing')
+        self.audio_scrub_enabled.setChecked(self.preferences.value('audio/audible_scrub', True, type=bool))
+        self.audio_scrub_enabled.toggled.connect(self._set_audible_scrub)
+        audio_page_layout.addWidget(self.audio_scrub_enabled)
+        self.audio_wave.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.audio_wave.customContextMenuRequested.connect(self._audio_context_menu)
         self.audio_wave.on_seek = self.seek_audio_fraction
         self.audio_wave.on_scrub_start = self._begin_audio_scrub
         self.audio_wave.on_scrub_end = self._end_audio_scrub
+        for widget, default in ((self.opacity_input, 100), (self.fps_input, 12),
+                                (self.frame_jump, 1), (self.hold_length, 3),
+                                (self.onion_spin, 35), (self.onion_previous_input, 1),
+                                (self.onion_next_input, 1), (self.audio_volume, 100),
+                                (self.audio_gain, 100)):
+            self._install_numeric_reset(widget, default)
         motion_controls = QHBoxLayout()
         self.motion_create = QPushButton('Make Motion Object from Layer')
         self.motion_create.setToolTip('Moves current-frame layer pixels into a reusable motion object')
@@ -4300,6 +4442,9 @@ class MainWindow(QMainWindow):
         preferences_action.setMenuRole(QAction.MenuRole.PreferencesRole)
         # Key dispatch is owned by the customizable Preferences QShortcut.
         self._build_animation_menu()
+        self.audio_menu = self.menuBar().addMenu('&Audio')
+        self.audio_menu.aboutToShow.connect(lambda: self._populate_audio_menu(self.audio_menu))
+        self._populate_audio_menu(self.audio_menu)
         viewmenu = self.menuBar().addMenu('&View')
         self._reset_rotation_action = viewmenu.addAction('Reset Canvas Rotation (0°)', self.reset_canvas_rotation)
         viewmenu.addSeparator()
@@ -4331,6 +4476,7 @@ class MainWindow(QMainWindow):
             ('Cycle Brush Presets', 'Shift+B', self._cycle_brush_preset),
             ('Eraser Tool', 'E', lambda: self._tool_shortcut('eraser')),
             ('Paint Bucket Tool', 'G', lambda: self._tool_shortcut('fill')),
+            ('Eyedropper Tool', 'I', lambda: self._tool_shortcut('eyedropper')),
             ('Rectangle Marquee', 'M', lambda: self._tool_shortcut('select', 'rectangle')),
             ('Freehand Lasso', 'L', lambda: self._tool_shortcut('select', 'freehand')),
             ('Cycle Lasso Tools', 'Shift+L', self._cycle_lasso),
@@ -4405,14 +4551,6 @@ class MainWindow(QMainWindow):
         self.multi_edit_checkbox.toggled.connect(multi.setChecked)
         onions = menu.addMenu('Onion Skins')
         onions.addAction('Set Previous / Next Ghost Ranges…', self.set_ghost_ranges_dialog)
-        audio = menu.addMenu('Audio')
-        audio.addAction('Import Audio WAV/MP3…', self.import_audio)
-        audio.addAction('Remove Audio', self.remove_audio)
-        mute = audio.addAction('Mute Audio')
-        mute.setCheckable(True)
-        mute.toggled.connect(self.audio_mute_checkbox.setChecked)
-        self.audio_mute_checkbox.toggled.connect(mute.setChecked)
-        audio.addAction('Volume…', self.set_audio_volume_dialog)
         motion = menu.addMenu('Motion Objects')
         motion.addAction('Create from Layer', self.create_motion_object)
         motion.addAction('Set Keyframe', self.set_motion_keyframe)
@@ -4471,11 +4609,103 @@ class MainWindow(QMainWindow):
             self.onion_previous_input.setValue(previous)
             self.onion_next_input.setValue(following)
 
+    def _slider_row(self, spin):
+        # Keep the original numeric input as the source of truth. A paint-time
+        # sync also covers programmatic updates made with blocked spin signals.
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        slider = QSlider(Qt.Orientation.Horizontal, row)
+        spin._paired_slider = slider
+        slider.setRange(spin.minimum(), spin.maximum())
+        slider.setSingleStep(spin.singleStep())
+        slider.setValue(spin.value())
+        slider.setMinimumHeight(30)
+        slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        slider.setStyleSheet('QSlider::handle:horizontal { width: 20px; height: 20px; margin: -7px 0; } QSlider::groove:horizontal { height: 6px; }')
+        slider.valueChanged.connect(spin.setValue)
+        spin.valueChanged.connect(slider.setValue)
+        # QSpinBox signals may be blocked by existing refresh code. Synchronize
+        # on paint without emitting slider changes back into the document.
+        class SyncSliderFilter(__import__('PySide6.QtCore', fromlist=['QObject']).QObject):
+            def eventFilter(self, watched, event):
+                if event.type() in (QEvent.Type.Paint, QEvent.Type.Show, QEvent.Type.EnabledChange):
+                    old = slider.blockSignals(True)
+                    slider.setRange(spin.minimum(), spin.maximum())
+                    slider.setValue(spin.value())
+                    slider.setEnabled(spin.isEnabled())
+                    slider.blockSignals(old)
+                return False
+        sync = SyncSliderFilter(slider)
+        spin.installEventFilter(sync)
+        slider.installEventFilter(sync)
+        layout.addWidget(slider, 1)
+        layout.addWidget(spin)
+        return row
+
+    def _populate_audio_menu(self, menu):
+        menu.clear()
+        has_audio = bool(getattr(self.canvas, 'audio_bytes', None))
+        menu.addAction('Replace Audio…' if has_audio else 'Import Audio WAV/MP3…', self.import_audio).setEnabled(self.project_active)
+        menu.addAction('Remove Audio', self.remove_audio).setEnabled(has_audio)
+        menu.addSeparator()
+        mute = menu.addAction('Mute Audio')
+        mute.setCheckable(True)
+        mute.setChecked(self.audio_mute_checkbox.isChecked())
+        mute.toggled.connect(self.audio_mute_checkbox.setChecked)
+        menu.addAction('Volume…', self.set_audio_volume_dialog)
+        scrub = menu.addAction('Audible Scrubbing')
+        scrub.setCheckable(True)
+        scrub.setChecked(self.audio_scrub_enabled.isChecked())
+        scrub.toggled.connect(self.audio_scrub_enabled.setChecked)
+        menu.addSeparator()
+        menu.addAction('Waveform Display Gain…', self._waveform_gain_dialog)
+        menu.addAction('Increase Waveform Height', lambda: self.audio_gain.setValue(round(self.audio_gain.value() * 1.25)))
+        menu.addAction('Decrease Waveform Height', lambda: self.audio_gain.setValue(round(self.audio_gain.value() / 1.25)))
+        menu.addAction('Auto-fit Waveform', self._auto_fit_waveform).setEnabled(bool(self.audio_wave.peaks))
+        menu.addAction('Reset Waveform Scale', lambda: self.audio_gain.setValue(100))
+
+    def _audio_context_menu(self, pos):
+        menu = QMenu(self.audio_wave)
+        self._populate_audio_menu(menu)
+        menu.exec(self.audio_wave.mapToGlobal(pos))
+
+    def _set_waveform_gain(self, value):
+        self.audio_wave.display_gain = value
+        self.audio_wave.update()
+        self.preferences.setValue('audio/display_gain', value)
+
+    def _auto_fit_waveform(self):
+        peak = max(self.audio_wave.peaks, default=0)
+        self.audio_gain.setValue(round(100 / peak) if peak > 0 else 100)
+
+    def _set_audible_scrub(self, enabled):
+        self.preferences.setValue('audio/audible_scrub', enabled)
+        if not enabled:
+            self._stop_scrub_preview()
+            self.scrub_preview_timer.stop()
+
+    def _audio_scalar_dialog(self, title, target):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        spin = QSpinBox()
+        spin.setRange(target.minimum(), target.maximum())
+        spin.setSuffix(' %')
+        spin.setValue(target.value())
+        layout.addWidget(self._slider_row(spin))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            target.setValue(spin.value())
+
     def set_audio_volume_dialog(self):
-        volume, ok = QInputDialog.getInt(self, 'Audio Volume', 'Volume (%):',
-                                          self.audio_volume.value(), 0, 100)
-        if ok:
-            self.audio_volume.setValue(volume)
+        self._audio_scalar_dialog('Audio Volume', self.audio_volume)
+
+    def _waveform_gain_dialog(self):
+        self._audio_scalar_dialog('Waveform Display Gain (visual only)', self.audio_gain)
 
     def create_motion_object(self):
         try:
@@ -4841,6 +5071,20 @@ class MainWindow(QMainWindow):
                     tint = QColor(white); tint.setAlpha(alpha)
                     painter.setBrush(tint); painter.setPen(Qt.PenStyle.NoPen)
                     painter.drawEllipse(QRectF(17-radius, 17-radius, radius*2, radius*2))
+        elif tool == 'eyedropper':
+            # An unmistakable diagonal pipette silhouette instead of a crosshair.
+            painter.save()
+            painter.translate(17, 17)
+            painter.rotate(45)
+            painter.setPen(QPen(white, 2.3, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(-4.5, -11, 9, 17), 2, 2)
+            painter.drawLine(QPointF(-5.5, -5), QPointF(5.5, -5))
+            painter.drawLine(QPointF(-2.5, 6), QPointF(0, 13))
+            painter.drawLine(QPointF(2.5, 6), QPointF(0, 13))
+            painter.drawLine(QPointF(-6, -11), QPointF(6, -11))
+            painter.restore()
         elif tool == 'fill':
             painter.save()
             painter.translate(0, 0)
@@ -4872,7 +5116,7 @@ class MainWindow(QMainWindow):
     def _refresh_tool_icons(self):
         if not hasattr(self, 'tool_buttons') or not hasattr(self, 'canvas'):
             return
-        for tool in ('brush', 'eraser', 'fill', 'select'):
+        for tool in ('brush', 'eraser', 'fill', 'eyedropper', 'select'):
             button = self.tool_buttons.get(tool)
             if button is None: continue
             button.setText('')
@@ -4886,6 +5130,8 @@ class MainWindow(QMainWindow):
                 button.setToolTip(f'Eraser: {self.canvas.eraser_size} px (E)')
             elif tool == 'fill':
                 button.setToolTip('Paint Bucket: fill with selected color (G)')
+            elif tool == 'eyedropper':
+                button.setToolTip('Eyedropper: sample the canvas color (I)')
             elif tool == 'zoom':
                 button.setToolTip('Zoom: click in, Alt+click out; hold Z+drag right/left')
             elif tool == 'rotate':
@@ -4942,9 +5188,22 @@ class MainWindow(QMainWindow):
         defaults[self.size_input] = (
             48 if self.canvas.tool == 'eraser' else 12)
         for widget, value in defaults.items():
-            widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            widget.customContextMenuRequested.connect(
-                lambda pos, w=widget, v=value: self._reset_setting_menu(w, pos, v))
+            self._install_numeric_reset(widget, value)
+
+    def _install_numeric_reset(self, widget, default):
+        widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        widget.customContextMenuRequested.connect(
+            lambda pos, w=widget, v=default: self._reset_setting_menu(w, pos, v))
+        # The spin box editor and slider handle can receive context clicks directly.
+        editor = widget.lineEdit()
+        editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        editor.customContextMenuRequested.connect(
+            lambda pos: self._reset_setting_menu(widget, widget.mapFromGlobal(editor.mapToGlobal(pos)), default))
+        slider = getattr(widget, '_paired_slider', None)
+        if slider is not None:
+            slider.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            slider.customContextMenuRequested.connect(
+                lambda pos: self._reset_setting_menu(widget, widget.mapFromGlobal(slider.mapToGlobal(pos)), default))
 
     def _default_tool_size(self):
         if self.canvas.tool == 'eraser':
@@ -4970,7 +5229,7 @@ class MainWindow(QMainWindow):
         tool = self.canvas.tool
         labels = {
             'brush': 'Brush Settings', 'eraser': 'Eraser Settings',
-            'fill': 'Paint Bucket Settings', 'select': 'Selection Settings',
+            'fill': 'Paint Bucket Settings', 'eyedropper': 'Eyedropper Settings', 'select': 'Selection Settings',
             'transform': 'Transform Settings', 'pan': 'Pan Tool',
             'zoom': 'Zoom Tool', 'rotate': 'Rotate View',
         }
@@ -4990,7 +5249,31 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'settings_scroll'):
             self.settings_scroll.widget().adjustSize()
 
+    def _tablet_eraser_transition(self, eraser):
+        """Switch tools on Qt tablet pointer changes, never mid-stroke."""
+        if not self.project_active or self.canvas.drawing:
+            return
+        self._tablet_switch_in_progress = True
+        try:
+            if eraser:
+                self._tablet_previous_tool = self.canvas.tool
+                if self.canvas.tool != 'eraser':
+                    self.set_tool('eraser')
+            else:
+                previous = self._tablet_previous_tool
+                self._tablet_previous_tool = None
+                if previous is not None and self.canvas.tool == 'eraser':
+                    self.set_tool(previous)
+        finally:
+            self._tablet_switch_in_progress = False
+
     def set_tool(self, tool):
+        if self.canvas._tablet_eraser_active and not self._tablet_switch_in_progress:
+            # Explicit mouse/keyboard tool choices always win over the last
+            # physical pen-end state. The next real tablet event may re-enable
+            # temporary erasing if the user actually uses that end again.
+            self._tablet_previous_tool = None
+            self.canvas._tablet_eraser_active = False
         old_tool = self.canvas.tool
         if old_tool == 'eraser':
             self.canvas.eraser_size = self.canvas.size
@@ -5753,6 +6036,17 @@ class MainWindow(QMainWindow):
         delete.setEnabled(len(self.canvas.layers) > 1)
         menu.exec(self.layers_list.viewport().mapToGlobal(pos))
 
+    def _restore_canvas_hover_after_menu(self):
+        if not self.project_active or not self.canvas.isVisible():
+            return
+        self.canvas.refresh_cursor()
+        local = self.canvas.mapFromGlobal(QCursor.pos())
+        if self.canvas.rect().contains(local):
+            self.canvas.show_hover(self.canvas.widget_to_document(QPointF(local)), 1.0)
+        else:
+            self.canvas.hover_position = None
+            self.canvas.update()
+
     def _canvas_context_menu(self, global_pos):
         if not self.project_active:
             return
@@ -5764,12 +6058,40 @@ class MainWindow(QMainWindow):
         active_menu = getattr(self, '_active_canvas_menu', None)
         if active_menu is not None and active_menu.isVisible():
             return
+        # The context-menu gesture never extends a brush/eraser stroke.
+        if self.canvas.drawing and self.canvas.input_kind == 'mouse':
+            self.canvas._end_stroke()
         menu = QMenu(self)
         self._active_canvas_menu = menu
+        # No canvas click should draw/fill while a context menu is open.
+        self.canvas._dismiss_canvas_menu_press = True
+        chosen_action = [False]
+        def action_chosen(_action):
+            chosen_action[0] = True
+            self.canvas._dismiss_canvas_menu_press = False
+        menu.triggered.connect(action_chosen)
         def clear_active_menu():
+            # Even an editable bucket spin box can leave this popup open.
+            # Closing it without choosing an action arms one non-drawing click.
+            if sys.platform.startswith('linux'):
+                # On Qt/Wayland the popup consumes the outside click before
+                # aboutToHide runs. Re-arming here would suppress the *next*
+                # intentional canvas click, forcing a third click to draw.
+                # The flag was already armed while the menu was visible.
+                self.canvas._dismiss_canvas_menu_press = False
+            elif (not chosen_action[0] and not self.canvas._dismiss_canvas_menu_mouse_down
+                    and not self.canvas._dismiss_canvas_menu_tablet_down):
+                self.canvas._dismiss_canvas_menu_press = True
+            # Dismissing with a canvas click must not leave a gesture open.
+            if self.canvas.drawing and self.canvas.input_kind == 'mouse':
+                self.canvas._end_stroke()
             if self._active_canvas_menu is menu:
                 self._active_canvas_menu = None
             menu.deleteLater()
+            # Qt popup grabs may skip the canvas Enter/Move event on dismissal.
+            # Restore the correct OS cursor and on-canvas brush hover after
+            # the popup is actually gone, without synthesizing a click.
+            QTimer.singleShot(0, self._restore_canvas_hover_after_menu)
         menu.aboutToHide.connect(clear_active_menu)
         if tool == 'brush':
             menu.addAction('Brush Library…', lambda: self._open_brush_library(False))
@@ -5897,6 +6219,8 @@ class MainWindow(QMainWindow):
                 widget.blockSignals(True)
                 widget.setValue(brush[key])
                 widget.blockSignals(False)
+        else:
+            self._sync_builtin_pressure_controls()
         self.update_custom_preview()
         self.canvas._stamp_cache.clear()
         self.set_tool('brush')
@@ -5909,6 +6233,16 @@ class MainWindow(QMainWindow):
             brush[key] = value
             save_custom_brush(ident, brush)
             self.update_custom_preview()
+        elif key in ('pressure_size', 'pressure_opacity'):
+            self.canvas.brush_settings[self.canvas.brush_preset][key] = value
+
+    def _sync_builtin_pressure_controls(self):
+        settings = self.canvas.brush_settings[self.canvas.brush_preset]
+        for key, default in (('pressure_size', 100), ('pressure_opacity', 0)):
+            widget = self.dynamics_controls[key]
+            widget.blockSignals(True)
+            widget.setValue(settings.get(key, default))
+            widget.blockSignals(False)
 
     def update_custom_preview(self):
         ident = self.canvas.active_custom_brush
@@ -6008,6 +6342,7 @@ class MainWindow(QMainWindow):
             self.canvas._stamp_cache.clear()
             self.update_custom_preview()
         settings = self.canvas.brush_settings[name]
+        self._sync_builtin_pressure_controls()
         self.size_input.blockSignals(True)
         self.size_input.setValue(self.canvas.eraser_size if self.canvas.tool == 'eraser' else settings['size'])
         self.size_input.blockSignals(False)
@@ -6095,6 +6430,10 @@ class MainWindow(QMainWindow):
         self.timeline_toggle.setVisible(False)
         self.workspace_picker.setEnabled(active)
         self.animation_menu.setEnabled(active)
+        self.audio_menu.setEnabled(active)
+        if not active:
+            self._tablet_previous_tool = None
+            self.canvas._tablet_eraser_active = False
         if active:
             # Each workspace remembers its own layout, with Drawing initially
             # timeline-free and Animation initially timeline-visible.
@@ -6518,6 +6857,8 @@ class MainWindow(QMainWindow):
         if not self._audio_scrubbing or self.canvas.playing:
             return
         if not getattr(self.canvas, 'audio_bytes', None):
+            return
+        if not self.audio_scrub_enabled.isChecked():
             return
         if self.audio_output.isMuted() or self.audio_output.volume() <= 0:
             return

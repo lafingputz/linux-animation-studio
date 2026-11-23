@@ -57,9 +57,9 @@ class Flood341Tests(unittest.TestCase):
     def test_bucket_icon_and_true_cursor_hooks(self):
         source = (ROOT/'main.py').read_text(encoding='utf-8')
         ast.parse(source)
-        for expected in ("APP_VERSION = \"0.40.0\"", "def draw_bucket_glyph(",
+        for expected in ("APP_VERSION = \"0.41.0-rc.1\"", "def draw_bucket_glyph(",
                          "def bucket_cursor():", "return QCursor(pix, 8, 35)",
-                         "if self.tool == 'fill':", "for tool in ('brush', 'eraser', 'fill', 'select'):"):
+                         "if self.tool == 'fill':", "for tool in ('brush', 'eraser', 'fill', 'eyedropper', 'select'):"):
             self.assertIn(expected, source)
 
     def test_benchmark_is_present(self):

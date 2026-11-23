@@ -18,9 +18,9 @@ class RotationResetShortcutTests(unittest.TestCase):
         self.assertIn('actual == required', SRC)
 
     def test_version_and_project_compatibility(self):
-        self.assertIn('APP_VERSION = "0.40.0"', SRC)
+        self.assertIn('APP_VERSION = "0.41.0-rc.1"', SRC)
         self.assertIn('PROJECT_VERSION = 6', SRC)
-        self.assertIn("VERSION = '0.40.0'", (ROOT / 'tools/package_release.py').read_text(encoding='utf-8'))
+        self.assertIn("VERSION = '0.41.0-rc.1'", (ROOT / 'tools/package_release.py').read_text(encoding='utf-8'))
 
 if __name__ == '__main__':
     unittest.main()

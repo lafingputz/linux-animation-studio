@@ -1,3 +1,36 @@
+# Linux Animation Studio v0.41.0-rc.1: Release Candidate
+
+> **Release candidate, not a stable release yet.** The software retains the **Linux Animation Studio** application/bundle name and the trial SpynFrame icon. The product-wide SpynFrame rebrand and `.spf` extension are not part of v0.41. The existing `.las` project format stays at **version 6**.
+
+## What's new in v0.41
+
+- **Eyedropper (I):** Sample from the active raster layer or the visible composite; excluded hidden layers and onion skins do not influence sampling. Transparent pixels leave the current drawing color unchanged. The toolbar shows a dedicated pipette icon.
+- **Physical stylus eraser detection:** Automatically switches to Eraser when a tablet reports a reverse-end eraser, then returns to the previous tool when the nib is used. Mouse and keyboard tool choices stay responsive. Hardware without a reverse eraser (for example Apple Pencil) can still use the manual Eraser tool.
+- **Brush pressure and interface controls:** Independent brush/eraser sizing, improved pressure-strength settings for built-in brushes, and numeric/slider adjustments with reset-to-default controls.
+- **Audio and workflow:** Updated audio controls and waveform gain presentation, while preserving playback and scrubbing.
+- **Canvas context menus:** Dismissing a popup does not leave an orphan brush stroke, produce a dot/erasure/fill, or hide the cursor. Linux/Wayland-specific handling avoids an extra suppressed click when resuming drawing.
+- **Compatibility:** Existing `.las` v6 files and prior supported formats can still be opened. This release does not migrate project files or change their extension.
+
+## Release-candidate testing and packaging
+
+All **189 automated tests** passed on each of Windows (Wacom Cintiq), macOS (M1 MacBook Air with iPad Sidecar and Apple Pencil), and Linux (Pop!_OS on Surface Pro 3 with Wacom) for the pre-release-candidate code. Applicable Phase 2 manual acceptance checks also passed. **Re-run the full tests and validate native installers after the version/packaging edits in this candidate.** Physical reverse-eraser testing applies to the Windows Cintiq only; Apple Pencil and the Linux test stylus do not have that end.
+
+From the repository root with the correct `.venv` active:
+
+```sh
+python -m unittest discover -s tests -q
+python tools/build.py --dry-run
+python tools/package_release.py --dry-run
+```
+
+To create an installer on its target OS, install `requirements-build.txt` and run `python tools/build.py`, `python tools/check_build.py`, then `python tools/package_release.py`. These scripts require **native** Windows, macOS, and Linux environments. Windows installer creation additionally needs Inno Setup 6; macOS packaging uses `hdiutil`; Linux produces an installable `tar.gz` (not a `.deb` or AppImage). FFmpeg may need to be supplied separately for video export.
+
+**macOS Gatekeeper:** Our DMGs are unsigned/unnotarized. If macOS blocks first launch, use **System Settings → Privacy & Security → Open Anyway** after attempting to open the trusted build. This does not mean the app has been notarized.
+
+See [v0.41 release candidate notes](docs/releases/v0.41.0-rc.1.md) for final installer and compatibility checks. **Do not tag/publish a stable release or merge the development PR until the release-candidate builds have been installed and checked on all three systems.**
+
+---
+
 # Linux Animation Studio v0.40.0: Audible Waveform Scrubbing (test candidate)
 
 ## New in v0.40.0
