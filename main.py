@@ -288,6 +288,11 @@ class Canvas(QWidget):
         self.ignore_mouse = False
         self._secondary_tablet_down = False
         self._secondary_context_suppress_until = 0.0
+        # Popup dismissal is not a drawing/fill action. The next canvas press
+        # is consumed unless the menu was closed by choosing an action.
+        self._dismiss_canvas_menu_press = False
+        self._dismiss_canvas_menu_mouse_down = False
+        self._dismiss_canvas_menu_tablet_down = False
         self.hover_position = None
         self.hover_pressure = 1.0
         self._before_stroke = None
@@ -1719,6 +1724,18 @@ class Canvas(QWidget):
         device = event.pointingDevice()
         name = device.name() if device else 'Unknown tablet'
         self._sync_tablet_eraser(device)
+        if self._dismiss_canvas_menu_tablet_down:
+            if typ == QEvent.Type.TabletRelease:
+                self._dismiss_canvas_menu_tablet_down = False
+                self.ignore_mouse = False
+            event.accept()
+            return
+        if typ == QEvent.Type.TabletPress and self._dismiss_canvas_menu_press:
+            self._dismiss_canvas_menu_press = False
+            self._dismiss_canvas_menu_tablet_down = True
+            self.ignore_mouse = True
+            event.accept()
+            return
         # A Wacom side button can produce tablet presses even while the nib is
         # hovering. Only the primary nib/button is allowed to paint or fill.
         # Qt may subsequently synthesize a mouse event for the same gesture.
@@ -1796,6 +1813,14 @@ class Canvas(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if self._dismiss_canvas_menu_press and event.button() == Qt.MouseButton.LeftButton:
+            self._dismiss_canvas_menu_press = False
+            self._dismiss_canvas_menu_mouse_down = True
+            event.accept()
+            return
+        if self._dismiss_canvas_menu_mouse_down:
+            event.accept()
+            return
         # A genuine mouse press must be able to draw immediately, even when
         # the last tablet event came from the pen's physical eraser end.
         # Ignore Qt's synthesized mouse events while a tablet stroke is active.
@@ -1828,6 +1853,9 @@ class Canvas(QWidget):
         event.accept()
 
     def mouseMoveEvent(self, event):
+        if self._dismiss_canvas_menu_mouse_down:
+            event.accept()
+            return
         if not self.ignore_mouse:
             self.show_hover(self.widget_to_document(event.position()), 1.0)
         # Qt popups can swallow a mouse release. Close that gesture as soon
@@ -1844,6 +1872,11 @@ class Canvas(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event):
+        if self._dismiss_canvas_menu_mouse_down:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._dismiss_canvas_menu_mouse_down = False
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.input_kind == 'mouse':
                 self._end_stroke()
@@ -6007,7 +6040,18 @@ class MainWindow(QMainWindow):
             self.canvas._end_stroke()
         menu = QMenu(self)
         self._active_canvas_menu = menu
+        # No canvas click should draw/fill while a context menu is open.
+        self.canvas._dismiss_canvas_menu_press = False
+        chosen_action = [False]
+        def action_chosen(_action):
+            chosen_action[0] = True
+            self.canvas._dismiss_canvas_menu_press = False
+        menu.triggered.connect(action_chosen)
         def clear_active_menu():
+            # Even an editable bucket spin box can leave this popup open.
+            # Closing it without choosing an action arms one non-drawing click.
+            if not chosen_action[0]:
+                self.canvas._dismiss_canvas_menu_press = True
             # Dismissing with a canvas click must not leave a gesture open.
             if self.canvas.drawing and self.canvas.input_kind == 'mouse':
                 self.canvas._end_stroke()
