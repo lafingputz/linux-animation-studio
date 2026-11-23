@@ -1796,6 +1796,13 @@ class Canvas(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # A genuine mouse press must be able to draw immediately, even when
+        # the last tablet event came from the pen's physical eraser end.
+        # Ignore Qt's synthesized mouse events while a tablet stroke is active.
+        if (not self.ignore_mouse and event.button() == Qt.MouseButton.LeftButton
+                and self._tablet_eraser_active):
+            self._tablet_eraser_active = False
+            self.tablet_eraser_changed.emit(False)
         if self.playing:
             event.accept()
             return
@@ -5008,6 +5015,20 @@ class MainWindow(QMainWindow):
                     tint = QColor(white); tint.setAlpha(alpha)
                     painter.setBrush(tint); painter.setPen(Qt.PenStyle.NoPen)
                     painter.drawEllipse(QRectF(17-radius, 17-radius, radius*2, radius*2))
+        elif tool == 'eyedropper':
+            # An unmistakable diagonal pipette silhouette instead of a crosshair.
+            painter.save()
+            painter.translate(17, 17)
+            painter.rotate(45)
+            painter.setPen(QPen(white, 2.3, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(-4.5, -11, 9, 17), 2, 2)
+            painter.drawLine(QPointF(-5.5, -5), QPointF(5.5, -5))
+            painter.drawLine(QPointF(-2.5, 6), QPointF(0, 13))
+            painter.drawLine(QPointF(2.5, 6), QPointF(0, 13))
+            painter.drawLine(QPointF(-6, -11), QPointF(6, -11))
+            painter.restore()
         elif tool == 'fill':
             painter.save()
             painter.translate(0, 0)
@@ -5039,7 +5060,7 @@ class MainWindow(QMainWindow):
     def _refresh_tool_icons(self):
         if not hasattr(self, 'tool_buttons') or not hasattr(self, 'canvas'):
             return
-        for tool in ('brush', 'eraser', 'fill', 'select'):
+        for tool in ('brush', 'eraser', 'fill', 'eyedropper', 'select'):
             button = self.tool_buttons.get(tool)
             if button is None: continue
             button.setText('')
@@ -5053,6 +5074,8 @@ class MainWindow(QMainWindow):
                 button.setToolTip(f'Eraser: {self.canvas.eraser_size} px (E)')
             elif tool == 'fill':
                 button.setToolTip('Paint Bucket: fill with selected color (G)')
+            elif tool == 'eyedropper':
+                button.setToolTip('Eyedropper: sample the canvas color (I)')
             elif tool == 'zoom':
                 button.setToolTip('Zoom: click in, Alt+click out; hold Z+drag right/left')
             elif tool == 'rotate':
@@ -5190,10 +5213,11 @@ class MainWindow(QMainWindow):
 
     def set_tool(self, tool):
         if self.canvas._tablet_eraser_active and not self._tablet_switch_in_progress:
-            # A manual tool choice while the pen is flipped becomes the tool
-            # to restore when its nib returns.
-            self._tablet_previous_tool = tool
-            return
+            # Explicit mouse/keyboard tool choices always win over the last
+            # physical pen-end state. The next real tablet event may re-enable
+            # temporary erasing if the user actually uses that end again.
+            self._tablet_previous_tool = None
+            self.canvas._tablet_eraser_active = False
         old_tool = self.canvas.tool
         if old_tool == 'eraser':
             self.canvas.eraser_size = self.canvas.size
